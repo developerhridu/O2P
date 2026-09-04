@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: o2p-api
+  namespace: default
+  labels:
+    app: o2p-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: o2p-api
+  template:
+    metadata:
+      labels:
+        app: o2p-api
+    spec:
+      containers:
+      - name: o2p-api
+        image: myregistry/o2p-api:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+        env:
+        - name: ASPNETCORE_ENVIRONMENT
+          value: "Production"
+        - name: ConnectionStrings__Metadata
+          valueFrom:
+            secretKeyRef:
+              name: o2p-secrets
+              key: metadata-db-connection
+        - name: JwtSettings__Secret
+          valueFrom:
+            secretKeyRef:
+              name: o2p-secrets
+              key: jwt-secret
+        - name: JwtSettings__Issuer
+          value: "o2p-auth"
+        - name: JwtSettings__Audience
+          value: "o2p-clients"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: o2p-api-service
+  namespace: default
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: 8080
+  selector:
+    app: o2p-api

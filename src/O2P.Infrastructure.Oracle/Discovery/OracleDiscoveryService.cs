@@ -1,0 +1,261 @@
+using O2P.Application.Interfaces;
+using O2P.Domain.Entities;
+using Oracle.ManagedDataAccess.Client;
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace O2P.Infrastructure.Oracle.Discovery
+{
+    public class OracleDiscoveryService : IOracleDiscoveryService
+    {
+        public async Task<IEnumerable<DiscoveryCache>> DiscoverTablesAsync(Connection connection, string password, string owner, CancellationToken cancellationToken, IReadOnlyCollection<string>? tableNames = null)
+        {
+            var normalizedTableNames = tableNames == null || tableNames.Count == 0
+                ? null
+                : tableNames.Select(t => t.Trim().ToUpperInvariant()).Where(t => t.Length > 0).Distinct().ToList();
+
+            if (connection.Host.Equals("mock", StringComparison.OrdinalIgnoreCase))
+            {
+                var mockTables = new List<DiscoveryCache>
+                {
+                    new DiscoveryCache
+                    {
+                        ConnectionId = connection.Id,
+                        Owner = owner.ToUpperInvariant(),
+                        TableName = "CUSTOMERS",
+                        NumRows = 1500,
+                        SegmentBytes = 256 * 1024,
+                        IsPartitioned = false,
+                        IsIot = false,
+                        LastRefreshedAt = DateTimeOffset.UtcNow
+                    },
+                    new DiscoveryCache
+                    {
+                        ConnectionId = connection.Id,
+                        Owner = owner.ToUpperInvariant(),
+                        TableName = "ORDERS",
+                        NumRows = 4500,
+                        SegmentBytes = 512 * 1024,
+                        IsPartitioned = true,
+                        IsIot = false,
+                        LastRefreshedAt = DateTimeOffset.UtcNow
+                    }
+                };
+
+                mockTables[0].Columns.Add(new DiscoveryColumnCache { ColumnName = "ID", ColumnId = 1, DataType = "NUMBER", DataPrecision = 12, DataScale = 0, IsNullable = false });
+                mockTables[0].Columns.Add(new DiscoveryColumnCache { ColumnName = "NAME", ColumnId = 2, DataType = "VARCHAR2", DataLength = 100, IsNullable = false });
+                mockTables[0].Columns.Add(new DiscoveryColumnCache { ColumnName = "EMAIL", ColumnId = 3, DataType = "VARCHAR2", DataLength = 150, IsNullable = true });
+                mockTables[0].Columns.Add(new DiscoveryColumnCache { ColumnName = "CREATED_AT", ColumnId = 4, DataType = "DATE", IsNullable = false });
+
+                mockTables[1].Columns.Add(new DiscoveryColumnCache { ColumnName = "ID", ColumnId = 1, DataType = "NUMBER", DataPrecision = 12, DataScale = 0, IsNullable = false });
+                mockTables[1].Columns.Add(new DiscoveryColumnCache { ColumnName = "CUSTOMER_ID", ColumnId = 2, DataType = "NUMBER", DataPrecision = 12, DataScale = 0, IsNullable = false });
+                mockTables[1].Columns.Add(new DiscoveryColumnCache { ColumnName = "TOTAL_AMOUNT", ColumnId = 3, DataType = "NUMBER", DataPrecision = 10, DataScale = 2, IsNullable = false });
+                mockTables[1].Columns.Add(new DiscoveryColumnCache { ColumnName = "STATUS", ColumnId = 4, DataType = "VARCHAR2", DataLength = 20, IsNullable = false });
+                mockTables[1].Columns.Add(new DiscoveryColumnCache { ColumnName = "CREATED_AT", ColumnId = 5, DataType = "DATE", IsNullable = false });
+
+                if (normalizedTableNames != null)
+                {
+                    return mockTables.Where(t => normalizedTableNames.Contains(t.TableName)).ToList();
+                }
+
+                return mockTables;
+            }
+
+            var csb = new OracleConnectionStringBuilder
+            {
+                DataSource = $"{connection.Host}:{connection.Port}/{connection.ServiceOrDb}",
+                UserID = connection.Username,
+                Password = password,
+                Pooling = true,
+                MinPoolSize = 1,
+                MaxPoolSize = 10
+            };
+
+            var results = new List<DiscoveryCache>();
+
+            using var conn = new OracleConnection(csb.ConnectionString);
+            await conn.OpenAsync(cancellationToken);
+
+            // Enriched query: table stats plus segment/LOB byte sizes. ALL_SEGMENTS and ALL_LOBS
+            // are locked down (no PUBLIC grant) in some hardened Oracle deployments, which raises
+            // ORA-00942 even though the connecting user can read ALL_TABLES/ALL_TAB_COLUMNS just
+            // fine - so this is tried first, then falls back to a plain ALL_TABLES-only query with
+            // segment/LOB size left null rather than failing discovery outright.
+            string enrichedQuery = @"
+                WITH SegStats AS (
+                    SELECT segment_name, SUM(bytes) as segment_bytes
+                    FROM all_segments
+                    WHERE owner = :owner AND segment_type LIKE 'TABLE%'
+                    GROUP BY segment_name
+                ),
+                LobStats AS (
+                    SELECT l.table_name, SUM(s.bytes) as lob_bytes
+                    FROM all_lobs l
+                    JOIN all_segments s ON s.owner = l.owner AND s.segment_name = l.segment_name
+                    WHERE l.owner = :owner
+                    GROUP BY l.table_name
+                )
+                SELECT
+                    t.table_name,
+                    t.num_rows,
+                    s.segment_bytes,
+                    l.lob_bytes,
+                    t.partitioned,
+                    t.iot_type
+                FROM all_tables t
+                LEFT JOIN SegStats s ON t.table_name = s.segment_name
+                LEFT JOIN LobStats l ON t.table_name = l.table_name
+                WHERE t.owner = :owner
+                AND t.nested = 'NO'
+                AND (t.iot_type IS NULL OR t.iot_type = 'IOT')"; // Exclude IOT overflow
+
+            string fallbackQuery = @"
+                SELECT
+                    t.table_name,
+                    t.num_rows,
+                    NULL as segment_bytes,
+                    NULL as lob_bytes,
+                    t.partitioned,
+                    t.iot_type
+                FROM all_tables t
+                WHERE t.owner = :owner
+                AND t.nested = 'NO'
+                AND (t.iot_type IS NULL OR t.iot_type = 'IOT')";
+
+            if (normalizedTableNames != null)
+            {
+                var placeholders = string.Join(", ", normalizedTableNames.Select((_, i) => $":tn{i}"));
+                enrichedQuery += $" AND t.table_name IN ({placeholders})";
+                fallbackQuery += $" AND t.table_name IN ({placeholders})";
+            }
+
+            OracleDataReader reader;
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = enrichedQuery;
+            AddTableQueryParameters(cmd, owner, normalizedTableNames);
+
+            try
+            {
+                reader = (OracleDataReader)await cmd.ExecuteReaderAsync(cancellationToken);
+            }
+            catch (OracleException)
+            {
+                cmd.Parameters.Clear();
+                cmd.CommandText = fallbackQuery;
+                AddTableQueryParameters(cmd, owner, normalizedTableNames);
+                reader = (OracleDataReader)await cmd.ExecuteReaderAsync(cancellationToken);
+            }
+
+            using (reader)
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var cache = new DiscoveryCache
+                    {
+                        ConnectionId = connection.Id,
+                        Owner = owner.ToUpperInvariant(),
+                        TableName = reader.GetString(0),
+                        NumRows = reader.IsDBNull(1) ? null : (long?)reader.GetDecimal(1),
+                        SegmentBytes = reader.IsDBNull(2) ? null : (long?)reader.GetDecimal(2),
+                        LobBytes = reader.IsDBNull(3) ? null : (long?)reader.GetDecimal(3),
+                        IsPartitioned = !reader.IsDBNull(4) && reader.GetString(4) == "YES",
+                        IsIot = !reader.IsDBNull(5),
+                        LastRefreshedAt = DateTimeOffset.UtcNow
+                    };
+                    results.Add(cache);
+                }
+            }
+
+            // M3 Column Discovery
+            string colQuery = @"
+                SELECT table_name, column_name, column_id, data_type, data_length, data_precision, data_scale, nullable, identity_column
+                FROM all_tab_columns
+                WHERE owner = :owner";
+
+            if (normalizedTableNames != null)
+            {
+                var colPlaceholders = string.Join(", ", normalizedTableNames.Select((_, i) => $":tn{i}"));
+                colQuery += $" AND table_name IN ({colPlaceholders})";
+            }
+            colQuery += " ORDER BY table_name, column_id";
+
+            using var colCmd = conn.CreateCommand();
+            colCmd.CommandText = colQuery;
+            var colOwnerParam = colCmd.CreateParameter();
+            colOwnerParam.ParameterName = "owner";
+            colOwnerParam.Value = owner.ToUpperInvariant();
+            colCmd.Parameters.Add(colOwnerParam);
+
+            if (normalizedTableNames != null)
+            {
+                for (var i = 0; i < normalizedTableNames.Count; i++)
+                {
+                    var colTnParam = colCmd.CreateParameter();
+                    colTnParam.ParameterName = $"tn{i}";
+                    colTnParam.Value = normalizedTableNames[i];
+                    colCmd.Parameters.Add(colTnParam);
+                }
+            }
+
+            var columnsByTable = new Dictionary<string, List<DiscoveryColumnCache>>();
+            using var colReader = await colCmd.ExecuteReaderAsync(cancellationToken);
+            while (await colReader.ReadAsync(cancellationToken))
+            {
+                var tName = colReader.GetString(0);
+                var col = new DiscoveryColumnCache
+                {
+                    ColumnName = colReader.GetString(1),
+                    ColumnId = (int)colReader.GetDecimal(2),
+                    DataType = colReader.GetString(3),
+                    DataLength = colReader.IsDBNull(4) ? null : (int?)colReader.GetDecimal(4),
+                    DataPrecision = colReader.IsDBNull(5) ? null : (int?)colReader.GetDecimal(5),
+                    DataScale = colReader.IsDBNull(6) ? null : (int?)colReader.GetDecimal(6),
+                    IsNullable = colReader.GetString(7) == "Y",
+                    IsIdentity = !colReader.IsDBNull(8) && colReader.GetString(8) == "YES"
+                };
+
+                if (!columnsByTable.ContainsKey(tName))
+                {
+                    columnsByTable[tName] = new List<DiscoveryColumnCache>();
+                }
+                columnsByTable[tName].Add(col);
+            }
+
+            foreach (var r in results)
+            {
+                if (columnsByTable.TryGetValue(r.TableName, out var cols))
+                {
+                    foreach (var c in cols)
+                    {
+                        r.Columns.Add(c);
+                    }
+                }
+            }
+
+            return results;
+        }
+
+        private static void AddTableQueryParameters(System.Data.Common.DbCommand cmd, string owner, List<string>? normalizedTableNames)
+        {
+            var ownerParam = cmd.CreateParameter();
+            ownerParam.ParameterName = "owner";
+            ownerParam.Value = owner.ToUpperInvariant();
+            cmd.Parameters.Add(ownerParam);
+
+            if (normalizedTableNames != null)
+            {
+                for (var i = 0; i < normalizedTableNames.Count; i++)
+                {
+                    var tnParam = cmd.CreateParameter();
+                    tnParam.ParameterName = $"tn{i}";
+                    tnParam.Value = normalizedTableNames[i];
+                    cmd.Parameters.Add(tnParam);
+                }
+            }
+        }
+    }
+}

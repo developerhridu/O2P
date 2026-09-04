@@ -1,0 +1,6 @@
+@O2P.Api_HostAddress = http://localhost:5183
+
+GET {{O2P.Api_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

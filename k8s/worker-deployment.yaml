@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: o2p-worker
+  namespace: default
+  labels:
+    app: o2p-worker
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: o2p-worker
+  template:
+    metadata:
+      labels:
+        app: o2p-worker
+    spec:
+      containers:
+      - name: o2p-worker
+        image: myregistry/o2p-worker:latest
+        imagePullPolicy: Always
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "2"
+          limits:
+            memory: "8Gi"
+            cpu: "4"
+        env:
+        - name: DOTNET_ENVIRONMENT
+          value: "Production"
+        - name: ConnectionStrings__Metadata
+          valueFrom:
+            secretKeyRef:
+              name: o2p-secrets
+              key: metadata-db-connection

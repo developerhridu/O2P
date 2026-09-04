@@ -1,0 +1,9 @@
+<Solution>
+  <Project Path="O2P.Api/O2P.Api.csproj" />
+  <Project Path="O2P.Application/O2P.Application.csproj" />
+  <Project Path="O2P.Domain/O2P.Domain.csproj" />
+  <Project Path="O2P.Infrastructure.Metadata/O2P.Infrastructure.Metadata.csproj" />
+  <Project Path="O2P.Infrastructure.Oracle/O2P.Infrastructure.Oracle.csproj" />
+  <Project Path="O2P.Infrastructure.Postgres/O2P.Infrastructure.Postgres.csproj" />
+  <Project Path="O2P.Worker/O2P.Worker.csproj" />
+</Solution>

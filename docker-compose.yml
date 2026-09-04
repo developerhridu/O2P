@@ -1,0 +1,47 @@
+services:
+  metadata-pg:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: ${O2P_METADATA_DB:-nonoraclemigrationdb}
+      POSTGRES_USER: ${O2P_METADATA_USER:-nonoraclemigrationdb}
+      POSTGRES_PASSWORD: ${O2P_METADATA_PASSWORD:-change-me-local-only}
+    ports:
+      - "7936:5432"
+    volumes:
+      - metadata_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: src/O2P.Api/Dockerfile
+    ports:
+      - "5000:80"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - JwtSettings__Secret=${O2P_JWT_SECRET:-CHANGE-ME-O2P-DEVELOPMENT-SECRET-MUST-BE-OVERRIDDEN}
+      - ConnectionStrings__MetadataDb=Host=metadata-pg;Port=5432;Database=${O2P_METADATA_DB:-nonoraclemigrationdb};Username=${O2P_METADATA_USER:-nonoraclemigrationdb};Password=${O2P_METADATA_PASSWORD:-change-me-local-only}
+    depends_on:
+      - metadata-pg
+
+  worker:
+    build:
+      context: .
+      dockerfile: src/O2P.Worker/Dockerfile
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ConnectionStrings__MetadataDb=Host=metadata-pg;Port=5432;Database=${O2P_METADATA_DB:-nonoraclemigrationdb};Username=${O2P_METADATA_USER:-nonoraclemigrationdb};Password=${O2P_METADATA_PASSWORD:-change-me-local-only}
+    depends_on:
+      - metadata-pg
+
+  ui:
+    build:
+      context: web
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+
+volumes:
+  metadata_data:

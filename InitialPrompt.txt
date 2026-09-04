@@ -1,0 +1,20 @@
+You are a expert prompt writer for application development. Now write a prompt of below requirement and give me the prompt in code block/code editor format.
+
+Do a very deep research and add as many features as you want which will be benefit in my conversion project.
+
+"
+I want an application, which can migration oracle table data into Postgres. For this the application much as below features
+
+1. There should be a different connection string configuration page. There is should be able to give both Oracle and Postgres Connection string.
+2. Each migration will be under and application setup. that application can have Oracle Test and Live database as well as Postgres test and live database.
+3. There should be a feature to specify exactly which table list i want to migrate. After giving the table list it will start migrating them.
+4. The process should be fastest + parallel. Note that there will be a lot of tables.
+5. The process/application should be able to handle 300GB data table. Also that the overall database size can be up to 4 TB.
+6. So the the application should be able to handle both large size table as well as do the migration process parallel and very fast.
+7. There can be different type of data such as Text, Number, data, Float, Double, Blob and Clob.
+8. During the work flow the service will first create the table then insert those data into those table.
+9. If the table already existing then it will create a new table with name tablename_mg1..2..3
+10. The progress should be clearly visibility by table count, MB/GB size also how much the each table migration progress.
+
+Do not start development yet. Just make me a detail plan. I will verify then you can start development.
+"
