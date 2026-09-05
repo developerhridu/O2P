@@ -53,7 +53,17 @@ builder.ConfigureServices((hostContext, services) =>
 try
 {
     var host = builder.Build();
-    Log.Information("O2P.Worker starting");
+    try
+    {
+        var oracleAsm = typeof(Oracle.ManagedDataAccess.Client.OracleConnection).Assembly;
+        Log.Information("O2P.Worker starting; Oracle driver loaded from {OracleLocation}", oracleAsm.Location);
+    }
+    catch (Exception ex)
+    {
+        Log.Fatal(ex, "Oracle.ManagedDataAccess failed to load. Worker cannot plan/read Oracle sources.");
+        throw;
+    }
+
     await host.RunAsync();
 }
 catch (Exception ex)

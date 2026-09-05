@@ -7,7 +7,9 @@ namespace O2P.Application.Schema
 {
     public static class SqlIdentifier
     {
-        private static readonly Regex OracleIdentifier = new(@"^[A-Za-z][A-Za-z0-9_$#]{0,127}$", RegexOptions.Compiled);
+        // Quoted Oracle identifiers may start with underscore (e.g. "_DATE"). Unquoted names
+        // must start with a letter; we always emit quoted form, so allow leading '_'.
+        private static readonly Regex OracleIdentifier = new(@"^[A-Za-z_][A-Za-z0-9_$#]{0,127}$", RegexOptions.Compiled);
 
         public static string QuotePostgres(string identifier)
         {

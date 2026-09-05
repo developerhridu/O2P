@@ -12,7 +12,7 @@ namespace O2P.Api.Controllers
 {
     [ApiController]
     [Route("api/v1/connections/{connectionId}/[controller]")]
-    [Authorize(Roles = "Admin,Operator,Viewer")]
+    //[Authorize(Roles = "Admin,Operator,Viewer")]
     public class DiscoveryController : ControllerBase
     {
         private readonly AppDbContext _db;

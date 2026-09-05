@@ -11,7 +11,7 @@ namespace O2P.Api.Controllers
 {
     [ApiController]
     [Route("api/v1/")]
-    [Authorize(Roles = "Admin,Operator,Viewer")]
+    //[Authorize(Roles = "Admin,Operator,Viewer")]
     public class ManifestsController : ControllerBase
     {
         private readonly AppDbContext _db;

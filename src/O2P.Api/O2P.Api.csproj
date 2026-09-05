@@ -4,6 +4,7 @@
     <TargetFramework>net8.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <StopRunningApiOnBuild Condition="'$(StopRunningApiOnBuild)' == '' and '$(Configuration)' == 'Debug' and '$(ContinuousIntegrationBuild)' != 'true'">true</StopRunningApiOnBuild>
   </PropertyGroup>
 
   <ItemGroup>
@@ -23,5 +24,14 @@
     <ProjectReference Include="..\O2P.Infrastructure.Oracle\O2P.Infrastructure.Oracle.csproj" />
     <ProjectReference Include="..\O2P.Infrastructure.Postgres\O2P.Infrastructure.Postgres.csproj" />
   </ItemGroup>
+
+  <!-- Stop any running Api before Debug build so bin DLLs are not locked (MSB3027). -->
+  <Target Name="StopRunningApiBeforeBuild" BeforeTargets="BeforeBuild" Condition="'$(StopRunningApiOnBuild)' == 'true'">
+    <Message Importance="high" Text="Stopping running O2P.Api processes so build can overwrite output DLLs..." />
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;$ErrorActionPreference='SilentlyContinue'; Get-Process -Name 'O2P.Api' | Stop-Process -Force; Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'O2P\\.Api(\\.dll|\\.exe|\\\\O2P\\.Api)' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }; Start-Sleep -Milliseconds 400; exit 0&quot;"
+          IgnoreExitCode="true"
+          StandardOutputImportance="low"
+          StandardErrorImportance="low" />
+  </Target>
 
 </Project>

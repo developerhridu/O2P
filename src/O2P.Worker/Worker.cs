@@ -39,16 +39,21 @@ namespace O2P.Worker
             _workerStartedAt = DateTimeOffset.UtcNow;
             _logger.LogInformation("Worker running at: {time}", DateTimeOffset.Now);
 
-            // Start command poller
+            // Previous process may have died while chunks were Status=Running with heartbeats
+            // still "valid". Requeue them so work can resume after a restart.
+            await RequeueOrphanedRunningChunksAsync(stoppingToken);
+
+            // Command poller + job prep must NOT share the chunk-worker slot acquire path.
+            // Previously Recover/Prepare ran in the same loop as AcquireWorkerSlotAsync; when all
+            // slots were held by hung chunk tasks, Queued jobs never started and leases never
+            // recovered — jobs looked "stuck / not checked".
             _ = Task.Run(() => PollCommandsAsync(stoppingToken), stoppingToken);
+            _ = Task.Run(() => PrepLoopAsync(stoppingToken), stoppingToken);
 
             while (!stoppingToken.IsCancellationRequested)
             {
                 try
                 {
-                    await RecoverExpiredLeasesAsync(stoppingToken);
-                    await PrepareQueuedJobsAsync(stoppingToken);
-
                     // Block until a slot is available
                     var lease = await _governor.AcquireWorkerSlotAsync(stoppingToken);
                     
@@ -77,13 +82,97 @@ namespace O2P.Worker
                 catch (OperationCanceledException) { }
                 catch (Exception ex)
                 {
-                    // A transient failure in the control loop (e.g. a brief metadata-DB blip in
-                    // RecoverExpiredLeasesAsync/PrepareQueuedJobsAsync) must never take the whole
-                    // Worker down - log it and keep polling after a short backoff. Previously any
-                    // such exception escaped ExecuteAsync and stopped the BackgroundService (host).
-                    _logger.LogError(ex, "Worker control loop iteration failed; backing off and retrying.");
+                    _logger.LogError(ex, "Worker chunk-dispatch loop failed; backing off and retrying.");
                     try { await Task.Delay(2000, stoppingToken); }
                     catch (OperationCanceledException) { }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Periodically recovers expired chunk leases and starts Queued jobs. Runs independently of
+        /// chunk-worker slot saturation so a full/hung worker pool cannot starve job pickup.
+        /// </summary>
+        private async Task PrepLoopAsync(CancellationToken stoppingToken)
+        {
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                try
+                {
+                    await RecoverExpiredLeasesAsync(stoppingToken);
+                    await PrepareQueuedJobsAsync(stoppingToken);
+                }
+                catch (OperationCanceledException) { return; }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Worker prep loop iteration failed; backing off and retrying.");
+                }
+
+                try { await Task.Delay(2000, stoppingToken); }
+                catch (OperationCanceledException) { return; }
+            }
+        }
+
+        private async Task RequeueOrphanedRunningChunksAsync(CancellationToken cancellationToken)
+        {
+            using var scope = _serviceProvider.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var requeued = await db.ChunkLogs
+                .Where(c => c.Status == "Running")
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(c => c.Status, "Pending")
+                    .SetProperty(c => c.WorkerId, (string?)null)
+                    .SetProperty(c => c.LeaseExpiresAt, (DateTimeOffset?)null)
+                    .SetProperty(c => c.StartedAt, (DateTimeOffset?)null), cancellationToken);
+
+            if (requeued > 0)
+            {
+                _logger.LogWarning("Requeued {Count} orphaned Running chunk(s) after worker start.", requeued);
+            }
+
+            // Chunks failed only because QuoteOracle rejected leading-underscore names (e.g. "_DATE").
+            // After the identifier fix, put them back in the queue so the table can finish.
+            var identifierFails = await db.ChunkLogs
+                .Where(c => c.Status == "Failed" && c.ErrorMessage != null && c.ErrorMessage.Contains("Unsafe Oracle identifier"))
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(c => c.Status, "Pending")
+                    .SetProperty(c => c.ErrorMessage, (string?)null)
+                    .SetProperty(c => c.WorkerId, (string?)null)
+                    .SetProperty(c => c.LeaseExpiresAt, (DateTimeOffset?)null)
+                    .SetProperty(c => c.CompletedAt, (DateTimeOffset?)null), cancellationToken);
+
+            if (identifierFails > 0)
+            {
+                _logger.LogWarning("Requeued {Count} chunk(s) that failed on Unsafe Oracle identifier.", identifierFails);
+
+                // Claim SQL only picks chunks on Loading tables under Running jobs.
+                var tableIds = await db.ChunkLogs
+                    .Where(c => c.Status == "Pending")
+                    .Select(c => c.TableRunId)
+                    .Distinct()
+                    .ToListAsync(cancellationToken);
+
+                if (tableIds.Count > 0)
+                {
+                    await db.TableRuns
+                        .Where(t => tableIds.Contains(t.Id) && (t.Status == "Failed" || t.Status == "Completed" || t.Status == "CompletedWithErrors"))
+                        .ExecuteUpdateAsync(s => s
+                            .SetProperty(t => t.Status, "Loading")
+                            .SetProperty(t => t.ErrorMessage, (string?)null)
+                            .SetProperty(t => t.CompletedAt, (DateTimeOffset?)null), cancellationToken);
+
+                    var jobIds = await db.TableRuns
+                        .Where(t => tableIds.Contains(t.Id))
+                        .Select(t => t.JobRunId)
+                        .Distinct()
+                        .ToListAsync(cancellationToken);
+
+                    await db.JobRuns
+                        .Where(j => jobIds.Contains(j.Id) &&
+                                    (j.Status == "Failed" || j.Status == "Completed" || j.Status == "CompletedWithErrors" || j.Status == "Paused"))
+                        .ExecuteUpdateAsync(s => s
+                            .SetProperty(j => j.Status, "Running")
+                            .SetProperty(j => j.CompletedAt, (DateTimeOffset?)null), cancellationToken);
                 }
             }
         }
@@ -318,9 +407,18 @@ RETURNING c.""Id"";";
                             .SetProperty(t => t.ErrorMessage, "One or more chunks failed. Use retry_failed to reprocess.")
                             .SetProperty(t => t.CompletedAt, DateTimeOffset.UtcNow), cancellationToken);
 
-                    if (failedClaimed > 0)
+                    // Always restore constraints on load failure (even if another caller claimed Failed).
+                    // Truncate first so PK/UNIQUE can be recreated after partial COPY.
+                    var restoreError = await RestoreConstraintsForTableRunAsync(
+                        scope.ServiceProvider, db, tableRunId, cancellationToken, truncateBeforeRestore: true);
+                    if (restoreError != null && failedClaimed > 0)
                     {
-                        await RestoreConstraintsForTableRunAsync(scope.ServiceProvider, db, tableRunId, cancellationToken);
+                        await db.TableRuns
+                            .Where(t => t.Id == tableRunId)
+                            .ExecuteUpdateAsync(s => s.SetProperty(
+                                t => t.ErrorMessage,
+                                "One or more chunks failed; constraint restore also failed: " + restoreError),
+                                cancellationToken);
                     }
 
                     await CheckAndCompleteJobAsync(db, jobRunId, cancellationToken);
@@ -395,13 +493,16 @@ RETURNING c.""Id"";";
         }
 
         /// <summary>
-        /// Re-applies constraints suspended before COPY. Returns an error message on failure, otherwise null.
+        /// Re-applies constraints suspended before COPY. On failure, truncates the target table
+        /// first so PK/UNIQUE can be recreated even after partial loads, then restores.
+        /// Returns an error message on failure, otherwise null.
         /// </summary>
         private async Task<string?> RestoreConstraintsForTableRunAsync(
             IServiceProvider services,
             AppDbContext db,
             long tableRunId,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            bool truncateBeforeRestore = false)
         {
             var tableRun = await db.TableRuns
                 .Include(t => t.JobRun).ThenInclude(j => j.Application).ThenInclude(a => a.Connections)
@@ -425,8 +526,38 @@ RETURNING c.""Id"";";
                 var secretProtector = services.GetRequiredService<ISecretProtector>();
                 var password = secretProtector.Unprotect(targetConn.SecretCiphertext ?? Array.Empty<byte>());
                 var constraintManager = services.GetRequiredService<IPostgresConstraintManager>();
-                await constraintManager.RestoreAsync(targetConn, password, snapshot, cancellationToken);
-                return null;
+
+                if (truncateBeforeRestore)
+                {
+                    try
+                    {
+                        await constraintManager.TruncateAsync(
+                            targetConn, password, snapshot.SchemaName, snapshot.TableName, cancellationToken);
+                    }
+                    catch (Exception truncateEx)
+                    {
+                        _logger.LogWarning(truncateEx,
+                            "Truncate before constraint restore failed for table run {TableRunId}; continuing with restore attempt.",
+                            tableRunId);
+                    }
+                }
+
+                try
+                {
+                    await constraintManager.RestoreAsync(targetConn, password, snapshot, cancellationToken);
+                    return null;
+                }
+                catch (Exception restoreEx) when (!truncateBeforeRestore)
+                {
+                    // Partial load may block PK/UNIQUE — wipe rows then restore schema.
+                    _logger.LogWarning(restoreEx,
+                        "Constraint restore failed for table run {TableRunId}; truncating and retrying restore.",
+                        tableRunId);
+                    await constraintManager.TruncateAsync(
+                        targetConn, password, snapshot.SchemaName, snapshot.TableName, cancellationToken);
+                    await constraintManager.RestoreAsync(targetConn, password, snapshot, cancellationToken);
+                    return null;
+                }
             }
             catch (Exception ex)
             {
@@ -500,7 +631,31 @@ RETURNING c.""Id"";";
                             if (cmd.Command == "launch" && job.Status == "Queued") job.Status = "Queued";
                             else if (cmd.Command == "pause") job.Status = "Paused";
                             else if (cmd.Command == "resume") job.Status = "Running";
-                            else if (cmd.Command == "cancel") job.Status = "Cancelled";
+                            else if (cmd.Command == "cancel")
+                            {
+                                job.Status = "Cancelled";
+                                var activeTables = await db.TableRuns
+                                    .Where(t => t.JobRunId == job.Id &&
+                                                (t.Status == "Creating" || t.Status == "Planning" || t.Status == "Loading" || t.Status == "Validating"))
+                                    .Select(t => t.Id)
+                                    .ToListAsync(cancellationToken);
+
+                                foreach (var tableRunId in activeTables)
+                                {
+                                    var restoreError = await RestoreConstraintsForTableRunAsync(
+                                        scope.ServiceProvider, db, tableRunId, cancellationToken, truncateBeforeRestore: true);
+                                    await db.TableRuns
+                                        .Where(t => t.Id == tableRunId)
+                                        .ExecuteUpdateAsync(s => s
+                                            .SetProperty(t => t.Status, "Failed")
+                                            .SetProperty(t => t.CompletedAt, DateTimeOffset.UtcNow)
+                                            .SetProperty(t => t.ErrorMessage,
+                                                restoreError == null
+                                                    ? "Cancelled; constraints restored."
+                                                    : "Cancelled; constraint restore failed: " + restoreError),
+                                            cancellationToken);
+                                }
+                            }
                             else if (cmd.Command == "retry_failed")
                             {
                                 await db.ChunkLogs
@@ -611,6 +766,16 @@ RETURNING c.""Id"";";
                         table.CompletedAt = DateTimeOffset.UtcNow;
                         await db.SaveChangesAsync(cancellationToken);
                     }
+
+                    // Safety net: restore even if MigrationEngine catch already attempted it.
+                    var restoreError = await RestoreConstraintsForTableRunAsync(
+                        scope.ServiceProvider, db, tableRunId, cancellationToken, truncateBeforeRestore: true);
+                    if (restoreError != null && table != null)
+                    {
+                        table.ErrorMessage = $"{ex.Message} | Constraint restore failed: {restoreError}";
+                        await db.SaveChangesAsync(cancellationToken);
+                    }
+
                     _logger.LogError(ex, "Failed to prepare table run {TableRunId}", tableRunId);
                 }
             }

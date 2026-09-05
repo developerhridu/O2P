@@ -80,11 +80,9 @@ namespace O2P.Infrastructure.Oracle.Discovery
             using var conn = new OracleConnection(csb.ConnectionString);
             await conn.OpenAsync(cancellationToken);
 
-            // Enriched query: table stats plus segment/LOB byte sizes. ALL_SEGMENTS and ALL_LOBS
-            // are locked down (no PUBLIC grant) in some hardened Oracle deployments, which raises
-            // ORA-00942 even though the connecting user can read ALL_TABLES/ALL_TAB_COLUMNS just
-            // fine - so this is tried first, then falls back to a plain ALL_TABLES-only query with
-            // segment/LOB size left null rather than failing discovery outright.
+            // Enriched query adds segment/LOB sizes via ALL_SEGMENTS/ALL_LOBS. Those views are
+            // locked down on some hardened Oracle deploys (ORA-00942). Probe both views first so
+            // we never run the enriched query when it would throw (avoids VS first-chance noise).
             string enrichedQuery = @"
                 WITH SegStats AS (
                     SELECT segment_name, SUM(bytes) as segment_bytes
@@ -133,22 +131,13 @@ namespace O2P.Infrastructure.Oracle.Discovery
                 fallbackQuery += $" AND t.table_name IN ({placeholders})";
             }
 
-            OracleDataReader reader;
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = enrichedQuery;
-            AddTableQueryParameters(cmd, owner, normalizedTableNames);
+            var useEnriched = await CanQueryAsync(conn, "SELECT 1 FROM all_segments WHERE 1 = 0", cancellationToken)
+                && await CanQueryAsync(conn, "SELECT 1 FROM all_lobs WHERE 1 = 0", cancellationToken);
 
-            try
-            {
-                reader = (OracleDataReader)await cmd.ExecuteReaderAsync(cancellationToken);
-            }
-            catch (OracleException)
-            {
-                cmd.Parameters.Clear();
-                cmd.CommandText = fallbackQuery;
-                AddTableQueryParameters(cmd, owner, normalizedTableNames);
-                reader = (OracleDataReader)await cmd.ExecuteReaderAsync(cancellationToken);
-            }
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = useEnriched ? enrichedQuery : fallbackQuery;
+            AddTableQueryParameters(cmd, owner, normalizedTableNames);
+            var reader = (OracleDataReader)await cmd.ExecuteReaderAsync(cancellationToken);
 
             using (reader)
             {
@@ -237,6 +226,21 @@ namespace O2P.Infrastructure.Oracle.Discovery
             }
 
             return results;
+        }
+
+        private static async Task<bool> CanQueryAsync(OracleConnection conn, string sql, CancellationToken cancellationToken)
+        {
+            try
+            {
+                using var probe = conn.CreateCommand();
+                probe.CommandText = sql;
+                await probe.ExecuteScalarAsync(cancellationToken);
+                return true;
+            }
+            catch (OracleException)
+            {
+                return false;
+            }
         }
 
         private static void AddTableQueryParameters(System.Data.Common.DbCommand cmd, string owner, List<string>? normalizedTableNames)

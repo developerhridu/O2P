@@ -14,7 +14,7 @@ namespace O2P.Api.Controllers
 {
     [ApiController]
     [Route("api/v1/[controller]")]
-    [Authorize(Roles = "Admin,Operator,Viewer")]
+   // [Authorize(Roles = "Admin,Operator,Viewer")]
     public class JobsController : ControllerBase
     {
         private readonly AppDbContext _db;

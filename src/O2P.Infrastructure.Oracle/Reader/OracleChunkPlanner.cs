@@ -322,12 +322,16 @@ namespace O2P.Infrastructure.Oracle.Reader
 
         /// <summary>
         /// Reads the extents of a table (or one of its partitions) and materialises each as a start/end
-        /// ROWID pair via DBMS_ROWID. Tries DBA_ views first (works cross-schema when granted), then the
-        /// ALL_ views, and returns null when neither is visible so the caller can fall back.
+        /// ROWID pair via DBMS_ROWID. Prefers ALL_ views (no exception for typical grants); falls back
+        /// to DBA_ only when ALL_ returns nothing (cross-schema / elevated readers).
         /// </summary>
         private static async Task<List<ExtentRange>?> FetchExtentsAsync(OracleConnection conn, string owner, string tableName, string? partitionName, CancellationToken cancellationToken)
         {
-            foreach (var view in new[] { "dba", "all" })
+            // ALL_ first. Only attempt DBA_ when the session has dictionary access (avoids ORA-00942).
+            var views = await CanUseDbaCatalogAsync(conn, cancellationToken)
+                ? new[] { "all", "dba" }
+                : new[] { "all" };
+            foreach (var view in views)
             {
                 var objectTypeMatch = partitionName == null
                     ? "o.object_type = 'TABLE' AND o.subobject_name IS NULL"
@@ -374,7 +378,7 @@ namespace O2P.Infrastructure.Oracle.Reader
                     {
                         return extents;
                     }
-                    // Zero rows from DBA_ can mean "not visible here" rather than "no extents"; try ALL_.
+                    // Zero rows from ALL_ can mean "not visible here"; try DBA_ next when available.
                 }
                 catch (OracleException)
                 {
@@ -387,7 +391,10 @@ namespace O2P.Infrastructure.Oracle.Reader
 
         private static async Task<List<string>?> FetchPartitionNamesAsync(OracleConnection conn, string owner, string tableName, CancellationToken cancellationToken)
         {
-            foreach (var view in new[] { "dba", "all" })
+            var views = await CanUseDbaCatalogAsync(conn, cancellationToken)
+                ? new[] { "all", "dba" }
+                : new[] { "all" };
+            foreach (var view in views)
             {
                 var sql = $@"
                     SELECT partition_name
@@ -419,6 +426,19 @@ namespace O2P.Infrastructure.Oracle.Reader
             }
 
             return null;
+        }
+
+        /// <summary>
+        /// True when the session can read DBA_ catalog views (SELECT ANY DICTIONARY or equivalent).
+        /// Checked via SESSION_PRIVS so we never issue a DBA_ query that would ORA-00942.
+        /// </summary>
+        private static async Task<bool> CanUseDbaCatalogAsync(OracleConnection conn, CancellationToken cancellationToken)
+        {
+            using var cmd = new OracleCommand(
+                "SELECT COUNT(*) FROM session_privs WHERE privilege = 'SELECT ANY DICTIONARY'",
+                conn);
+            var count = Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken));
+            return count > 0;
         }
 
         /// <summary>

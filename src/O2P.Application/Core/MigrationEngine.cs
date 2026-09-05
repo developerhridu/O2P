@@ -150,7 +150,7 @@ namespace O2P.Application.Core
             var targetSchema = tableRun.JobRun.TargetSchema;
             var targetTableName = tableRun.TargetTableName;
             PostgresConstraintSnapshot? snapshot = null;
-            var constraintsDropped = false;
+            var constraintsSuspended = false;
 
             try
             {
@@ -165,8 +165,9 @@ namespace O2P.Application.Core
                 tableRun.ConstraintSnapshotJson = PostgresConstraintSnapshot.Serialize(snapshot);
                 await _db.SaveChangesAsync(cancellationToken);
 
+                // Mark suspended before Drop so any mid-drop failure still triggers restore.
+                constraintsSuspended = snapshot.Constraints.Count > 0;
                 await _constraintManager.DropAsync(targetConn!, postgresPassword, snapshot, cancellationToken);
-                constraintsDropped = snapshot.Constraints.Count > 0;
 
                 if (tableExisted)
                 {
@@ -205,17 +206,22 @@ namespace O2P.Application.Core
                 tableRun.Status = "Loading";
                 await _db.SaveChangesAsync(cancellationToken);
             }
-            catch
+            catch (Exception ex)
             {
-                if (constraintsDropped && snapshot != null)
+                if (constraintsSuspended && snapshot != null)
                 {
                     try
                     {
+                        // Partial rows can block PK/UNIQUE recreate — clear then restore schema.
+                        await _constraintManager.TruncateAsync(
+                            targetConn!, postgresPassword, targetSchema, targetTableName, cancellationToken);
                         await _constraintManager.RestoreAsync(targetConn!, postgresPassword, snapshot, cancellationToken);
                     }
-                    catch
+                    catch (Exception restoreEx)
                     {
-                        // Preserve the original failure; restore is best-effort here.
+                        throw new InvalidOperationException(
+                            $"Table prepare failed and constraint restore also failed. Original: {ex.Message}. Restore: {restoreEx.Message}",
+                            ex);
                     }
                 }
 
