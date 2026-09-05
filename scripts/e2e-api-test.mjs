@@ -201,7 +201,7 @@ async function main() {
     const allCompleted = job.tableRuns.every(t => t.status === 'Completed');
     assert(allCompleted, 'every table validated as Completed', `statuses=${job.tableRuns.map(t=>t.status).join(',')}`);
     assert(job.tableRuns.every(t => t.completedAt), 'every table has completedAt');
-    // verify _mgN collision naming: targets should be CUSTOMERS/ORDERS on first run
+    // verify target naming: always same-named as source (no _mgN)
     const names = job.tableRuns.map(t => t.targetTableName).sort();
     ok('target table names', names.join(', '));
   }
@@ -215,15 +215,15 @@ async function main() {
   r = await api('GET', `/api/v1/jobs/${jobId}/metrics`);
   assert(r.status === 200, 'get job metrics', `status=${r.status}`);
 
-  // ---- COLLISION RE-RUN (_mgN) ----
-  log('\n[Collision suffix (_mgN) on re-run]');
+  // ---- SAME-NAME RE-RUN (no _mgN) ----
+  log('\n[Same-name target on re-run]');
   r = await api('POST', '/api/v1/jobs', { applicationId: appId, manifestId, sourceSlot: 'oracle_test', targetSlot: 'pg_test', targetSchema: 'public' });
   if (r.status === 201) {
     const job2 = r.data;
     const jr2 = await api('GET', `/api/v1/jobs/${job2.id}`);
     const names2 = (jr2.data.tableRuns || []).map(t => t.targetTableName);
-    assert(names2.some(n => /_mg1$/.test(n)), 'second job allocates _mg1 suffix', `names=${names2.join(', ')}`);
-  } else fail('create second job for collision test', `status=${r.status} body=${JSON.stringify(r.data)}`);
+    assert(names2.every(n => !/_mg\d+$/.test(n)), 'second job reuses base table names (no _mgN)', `names=${names2.join(', ')}`);
+  } else fail('create second job for same-name test', `status=${r.status} body=${JSON.stringify(r.data)}`);
 
   // ---- LIVE CONFIRMATION PHRASE ----
   log('\n[Live target confirmation phrase]');

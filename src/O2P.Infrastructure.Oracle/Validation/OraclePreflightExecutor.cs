@@ -4,11 +4,19 @@ using Oracle.ManagedDataAccess.Client;
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 
 namespace O2P.Infrastructure.Oracle.Validation
 {
     public class OraclePreflightExecutor : ISourcePreflightExecutor
     {
+        private readonly ILogger<OraclePreflightExecutor> _logger;
+
+        public OraclePreflightExecutor(ILogger<OraclePreflightExecutor> logger)
+        {
+            _logger = logger;
+        }
+
         public async Task<bool> CheckPrivilegesAsync(Connection sourceConnection, string password, CancellationToken cancellationToken)
         {
             try
@@ -26,15 +34,15 @@ namespace O2P.Infrastructure.Oracle.Validation
 
                 using var cmd = conn.CreateCommand();
                 cmd.CommandText = "SELECT COUNT(*) FROM SESSION_PRIVS WHERE PRIVILEGE IN ('SELECT ANY TABLE', 'SELECT ANY DICTIONARY')";
-                var count = Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken));
-                
-                // For this validation, we require at least one elevated read privilege, 
-                // or we assume they are querying their own schema.
-                // We'll return true as long as we could connect and query SESSION_PRIVS.
-                return true; 
+                Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken));
+
+                // Return true as long as we could connect and query SESSION_PRIVS.
+                return true;
             }
-            catch
+            catch (Exception ex)
             {
+                _logger.LogWarning(ex, "Oracle privilege check failed for {Host}:{Port}/{Service} user {User}",
+                    sourceConnection.Host, sourceConnection.Port, sourceConnection.ServiceOrDb, sourceConnection.Username);
                 return false;
             }
         }

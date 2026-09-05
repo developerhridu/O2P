@@ -19,6 +19,11 @@ namespace O2P.Domain.Entities
         
         public string? ErrorMessage { get; set; }
 
+        /// <summary>
+        /// JSON snapshot of Postgres constraints suspended for load (restored after load or on failure).
+        /// </summary>
+        public string? ConstraintSnapshotJson { get; set; }
+
         public DateTimeOffset? StartedAt { get; set; }
         public DateTimeOffset? CompletedAt { get; set; }
 

@@ -7,8 +7,27 @@ using O2P.Infrastructure.Oracle;
 using O2P.Infrastructure.Postgres;
 using O2P.Worker;
 using O2P.Worker.Core;
+using Serilog;
+using System.IO;
 
 var builder = Host.CreateDefaultBuilder(args);
+
+builder.UseSerilog((context, config) =>
+{
+    var logDir = Path.GetFullPath(Path.Combine(context.HostingEnvironment.ContentRootPath, "..", "..", "logs"));
+    Directory.CreateDirectory(logDir);
+
+    config.ReadFrom.Configuration(context.Configuration)
+          .Enrich.FromLogContext()
+          .Enrich.WithProperty("Application", "O2P.Worker")
+          .WriteTo.Console()
+          .WriteTo.File(
+              path: Path.Combine(logDir, "o2p-worker-.log"),
+              rollingInterval: RollingInterval.Day,
+              retainedFileCountLimit: 14,
+              shared: true,
+              outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] ({Application}) {Message:lj}{NewLine}{Exception}");
+});
 
 builder.ConfigureServices((hostContext, services) =>
 {
@@ -31,5 +50,18 @@ builder.ConfigureServices((hostContext, services) =>
     services.AddHostedService<MetricsSamplerService>();
 });
 
-var host = builder.Build();
-await host.RunAsync();
+try
+{
+    var host = builder.Build();
+    Log.Information("O2P.Worker starting");
+    await host.RunAsync();
+}
+catch (Exception ex)
+{
+    Log.Fatal(ex, "O2P.Worker terminated unexpectedly");
+    throw;
+}
+finally
+{
+    await Log.CloseAndFlushAsync();
+}

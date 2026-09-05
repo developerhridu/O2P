@@ -1,4 +1,5 @@
-export const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api/v1';
+// Dev: relative /api/v1 is proxied by Vite to the API. Override with VITE_API_BASE_URL for static/prod hosts.
+export const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api/v1';
 const TOKEN_KEY = 'o2p_token';
 const AUTH_KEY = 'o2p_auth';
 export const AUTH_EVENT = 'o2p-auth-changed';

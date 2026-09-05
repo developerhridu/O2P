@@ -11,6 +11,7 @@ namespace O2P.Infrastructure.Postgres
         public static IServiceCollection AddPostgresInfrastructure(this IServiceCollection services)
         {
             services.AddScoped<IPostgresDdlExecutor, PostgresDdlExecutor>();
+            services.AddScoped<IPostgresConstraintManager, PostgresConstraintManager>();
             services.AddScoped<IPostgresBinaryWriter, PostgresBinaryWriter>();
             services.AddScoped<ITargetCountExecutor, PostgresCountExecutor>();
             services.AddScoped<ITargetPreflightExecutor, PostgresPreflightExecutor>();

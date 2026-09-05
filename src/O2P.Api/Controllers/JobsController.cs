@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using O2P.Infrastructure.Metadata;
 using O2P.Domain.Entities;
 using O2P.Application.Core;
@@ -19,12 +20,14 @@ namespace O2P.Api.Controllers
         private readonly AppDbContext _db;
         private readonly MigrationEngine _engine;
         private readonly ISecretProtector _secretProtector;
+        private readonly ILogger<JobsController> _logger;
 
-        public JobsController(AppDbContext db, MigrationEngine engine, ISecretProtector secretProtector)
+        public JobsController(AppDbContext db, MigrationEngine engine, ISecretProtector secretProtector, ILogger<JobsController> logger)
         {
             _db = db;
             _engine = engine;
             _secretProtector = secretProtector;
+            _logger = logger;
         }
 
         [HttpGet]
@@ -94,7 +97,7 @@ namespace O2P.Api.Controllers
             _db.JobRuns.Add(job);
             await _db.SaveChangesAsync();
 
-            // Populate TableRuns and allocate target table names using collision suffix logic
+            // Populate TableRuns and always use the source table name (load into existing same-named target).
             foreach (var table in manifest.Tables.Where(t => t.Included))
             {
                 var tableRun = new TableRun
@@ -166,6 +169,7 @@ namespace O2P.Api.Controllers
             var preflightResult = await preflightValidator.RunPreflightChecksAsync(sourceConn, sourcePassword, targetConn, targetPassword, job.TargetSchema, default);
             if (!preflightResult.Passed)
             {
+                _logger.LogWarning("Preflight failed for job {JobId} schema {Schema}: {Details}", job.Id, job.TargetSchema, preflightResult.Details);
                 return BadRequest(new
                 {
                     message = "Preflight check failed. Job launch aborted.",

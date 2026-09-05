@@ -10,6 +10,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using O2P.Application.Core;
 using O2P.Application.Interfaces;
+using O2P.Application.Schema;
 using O2P.Domain.Entities;
 using O2P.Infrastructure.Metadata;
 using O2P.Worker.Core;
@@ -310,12 +311,17 @@ RETURNING c.""Id"";";
                 if (hasFailedChunks)
                 {
                     // Atomically claim the Loading -> Failed transition so only one caller acts.
-                    await db.TableRuns
+                    var failedClaimed = await db.TableRuns
                         .Where(t => t.Id == tableRunId && t.Status == "Loading")
                         .ExecuteUpdateAsync(s => s
                             .SetProperty(t => t.Status, "Failed")
                             .SetProperty(t => t.ErrorMessage, "One or more chunks failed. Use retry_failed to reprocess.")
                             .SetProperty(t => t.CompletedAt, DateTimeOffset.UtcNow), cancellationToken);
+
+                    if (failedClaimed > 0)
+                    {
+                        await RestoreConstraintsForTableRunAsync(scope.ServiceProvider, db, tableRunId, cancellationToken);
+                    }
 
                     await CheckAndCompleteJobAsync(db, jobRunId, cancellationToken);
                     return;
@@ -342,6 +348,17 @@ RETURNING c.""Id"";";
 
                 try
                 {
+                    var restoreError = await RestoreConstraintsForTableRunAsync(scope.ServiceProvider, db, tableRunId, cancellationToken);
+                    if (restoreError != null)
+                    {
+                        tableRun.Status = "Failed";
+                        tableRun.ErrorMessage = $"Constraint restore failed after load: {restoreError}";
+                        tableRun.CompletedAt = DateTimeOffset.UtcNow;
+                        await db.SaveChangesAsync(cancellationToken);
+                        await CheckAndCompleteJobAsync(db, jobRunId, cancellationToken);
+                        return;
+                    }
+
                     var validator = scope.ServiceProvider.GetRequiredService<IValidationService>();
                     var sourceConnId = tableRun.JobRun.Application.Connections.First(c => c.Slot == tableRun.JobRun.SourceSlot).ConnectionId;
                     var targetConnId = tableRun.JobRun.Application.Connections.First(c => c.Slot == tableRun.JobRun.TargetSlot).ConnectionId;
@@ -374,6 +391,49 @@ RETURNING c.""Id"";";
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error checking or running validation.");
+            }
+        }
+
+        /// <summary>
+        /// Re-applies constraints suspended before COPY. Returns an error message on failure, otherwise null.
+        /// </summary>
+        private async Task<string?> RestoreConstraintsForTableRunAsync(
+            IServiceProvider services,
+            AppDbContext db,
+            long tableRunId,
+            CancellationToken cancellationToken)
+        {
+            var tableRun = await db.TableRuns
+                .Include(t => t.JobRun).ThenInclude(j => j.Application).ThenInclude(a => a.Connections)
+                .FirstOrDefaultAsync(t => t.Id == tableRunId, cancellationToken);
+
+            if (tableRun == null) return null;
+
+            var snapshot = PostgresConstraintSnapshot.Deserialize(tableRun.ConstraintSnapshotJson);
+            if (snapshot == null || snapshot.Constraints.Count == 0) return null;
+
+            try
+            {
+                var targetConnId = tableRun.JobRun.Application.Connections
+                    .First(c => c.Slot == tableRun.JobRun.TargetSlot).ConnectionId;
+                var targetConn = await db.Connections.FindAsync(new object[] { targetConnId }, cancellationToken);
+                if (targetConn == null)
+                {
+                    return "Target connection not found for constraint restore.";
+                }
+
+                var secretProtector = services.GetRequiredService<ISecretProtector>();
+                var password = secretProtector.Unprotect(targetConn.SecretCiphertext ?? Array.Empty<byte>());
+                var constraintManager = services.GetRequiredService<IPostgresConstraintManager>();
+                await constraintManager.RestoreAsync(targetConn, password, snapshot, cancellationToken);
+                return null;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "Failed to restore constraints for table run {TableRunId} ({Schema}.{Table}). Schema may be left without suspended constraints.",
+                    tableRunId, snapshot.SchemaName, snapshot.TableName);
+                return ex.Message;
             }
         }
 

@@ -17,7 +17,12 @@ export default function Login() {
       await login(username, password);
       navigate('/');
     } catch (err: any) {
-      setError(err.message || 'Sign in failed');
+      const message = err?.message || 'Sign in failed';
+      setError(
+        message === 'Failed to fetch'
+          ? 'Cannot reach the API. Check that O2P.Api is running and try again.'
+          : message
+      );
     } finally {
       setSubmitting(false);
     }

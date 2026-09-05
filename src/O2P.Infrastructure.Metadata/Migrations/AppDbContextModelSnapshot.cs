@@ -939,6 +939,9 @@ namespace O2P.Infrastructure.Metadata.Migrations
                     b.Property<DateTimeOffset?>("CompletedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<string>("ConstraintSnapshotJson")
+                        .HasColumnType("jsonb");
+
                     b.Property<string>("ErrorMessage")
                         .HasColumnType("text");
 

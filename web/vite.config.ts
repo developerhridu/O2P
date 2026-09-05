@@ -10,5 +10,12 @@ export default defineConfig({
   ],
   server: {
     port: 5151,
+    proxy: {
+      // Same-origin /api in dev — avoids CORS against the API on :5000
+      '/api': {
+        target: 'http://127.0.0.1:5000',
+        changeOrigin: true,
+      },
+    },
   },
 })

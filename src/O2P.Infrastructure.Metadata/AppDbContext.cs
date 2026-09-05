@@ -128,6 +128,7 @@ namespace O2P.Infrastructure.Metadata
                 b.ToTable("table_runs");
                 b.HasKey(e => e.Id);
                 b.Property(e => e.Id).UseIdentityAlwaysColumn();
+                b.Property(e => e.ConstraintSnapshotJson).HasColumnType("jsonb");
                 b.HasOne(e => e.JobRun).WithMany(j => j.TableRuns).HasForeignKey(e => e.JobRunId);
                 b.HasOne(e => e.ManifestTable).WithMany().HasForeignKey(e => e.ManifestTableId);
                 b.HasIndex(e => e.Status);

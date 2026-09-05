@@ -14,18 +14,29 @@ using O2P.Infrastructure.Oracle;
 using O2P.Infrastructure.Postgres;
 using O2P.Application;
 using Serilog;
+using System.IO;
 using System.Text;
 using System.Threading.RateLimiting;
 using System.Security.Claims;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Configure Serilog
+// Configure Serilog (console + rolling file under repo logs/)
 builder.Host.UseSerilog((context, config) =>
 {
+    var logDir = Path.GetFullPath(Path.Combine(context.HostingEnvironment.ContentRootPath, "..", "..", "logs"));
+    Directory.CreateDirectory(logDir);
+
     config.ReadFrom.Configuration(context.Configuration)
           .Enrich.FromLogContext()
-          .WriteTo.Console();
+          .Enrich.WithProperty("Application", "O2P.Api")
+          .WriteTo.Console()
+          .WriteTo.File(
+              path: Path.Combine(logDir, "o2p-api-.log"),
+              rollingInterval: RollingInterval.Day,
+              retainedFileCountLimit: 14,
+              shared: true,
+              outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] ({Application}) {Message:lj}{NewLine}{Exception}");
 });
 
 // Add Metadata Infrastructure (EF Core, Identity, Data Protection)
@@ -45,6 +56,8 @@ var corsOrigins = securitySection.GetSection("Cors:AllowedOrigins").Get<string[]
     "http://127.0.0.1:3000",
     "http://localhost:3051",
     "http://127.0.0.1:3051",
+    "http://localhost:5151",
+    "http://127.0.0.1:5151",
     "http://27.147.159.194:3051"
 };
 
@@ -279,10 +292,19 @@ app.Use(async (context, next) =>
 
 app.UseCors("Frontend");
 app.UseRateLimiter();
+app.UseSerilogRequestLogging();
 
 app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
 
-app.Run();
+try
+{
+    Log.Information("O2P.Api starting; file logs under ../../logs/o2p-api-*.log");
+    app.Run();
+}
+finally
+{
+    Log.CloseAndFlush();
+}

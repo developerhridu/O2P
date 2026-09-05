@@ -4,11 +4,19 @@ using Npgsql;
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 
 namespace O2P.Infrastructure.Postgres.Validation
 {
     public class PostgresPreflightExecutor : ITargetPreflightExecutor
     {
+        private readonly ILogger<PostgresPreflightExecutor> _logger;
+
+        public PostgresPreflightExecutor(ILogger<PostgresPreflightExecutor> logger)
+        {
+            _logger = logger;
+        }
+
         private string GetConnectionString(Connection conn, string password)
         {
             var csb = new NpgsqlConnectionStringBuilder
@@ -33,15 +41,16 @@ namespace O2P.Infrastructure.Postgres.Validation
                 using var cmd = conn.CreateCommand();
                 cmd.CommandText = "SELECT current_setting('server_version_num')";
                 var versionStr = await cmd.ExecuteScalarAsync(cancellationToken) as string;
-                
+
                 if (int.TryParse(versionStr, out int versionNum))
                 {
                     return versionNum >= 140000;
                 }
                 return false;
             }
-            catch
+            catch (Exception ex)
             {
+                _logger.LogWarning(ex, "Postgres version check failed for {Host}/{Database}", targetConnection.Host, targetConnection.ServiceOrDb);
                 return false;
             }
         }
@@ -54,13 +63,14 @@ namespace O2P.Infrastructure.Postgres.Validation
                 await conn.OpenAsync(cancellationToken);
 
                 using var cmd = conn.CreateCommand();
-                // Check if current user has USAGE and CREATE on the specified schema
-                cmd.CommandText = $"SELECT has_schema_privilege('{schema}', 'USAGE, CREATE')";
+                cmd.CommandText = "SELECT has_schema_privilege(@schema, 'USAGE, CREATE')";
+                cmd.Parameters.AddWithValue("schema", schema);
                 var hasPriv = await cmd.ExecuteScalarAsync(cancellationToken);
                 return Convert.ToBoolean(hasPriv);
             }
-            catch
+            catch (Exception ex)
             {
+                _logger.LogWarning(ex, "Postgres schema privilege check failed for schema {Schema}", schema);
                 return false;
             }
         }
@@ -87,8 +97,9 @@ namespace O2P.Infrastructure.Postgres.Validation
 
                 return true;
             }
-            catch
+            catch (Exception ex)
             {
+                _logger.LogWarning(ex, "Postgres DDL probe failed for schema {Schema}", schema);
                 return false;
             }
         }
