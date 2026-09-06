@@ -37,7 +37,9 @@ namespace O2P.Infrastructure.Postgres.Writer
                 Password = password,
                 Pooling = true,
                 MinPoolSize = 1,
-                MaxPoolSize = 100
+                MaxPoolSize = 100,
+                Timeout = 60,
+                CommandTimeout = 600
             };
 
             await using var conn = new NpgsqlConnection(csb.ConnectionString);

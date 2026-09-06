@@ -1,7 +1,18 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { ArrowLeft, RefreshCw, CheckCircle2, AlertCircle, ChevronDown, ChevronUp } from 'lucide-react';
-import { fetchJob, fetchMetrics, fetchValidation } from '../api';
+import {
+  ArrowLeft,
+  RefreshCw,
+  CheckCircle2,
+  AlertCircle,
+  ChevronDown,
+  ChevronUp,
+  Ban,
+  RotateCcw,
+  Pause,
+  Play
+} from 'lucide-react';
+import { commandJob, fetchJob, fetchMetrics, fetchValidation, hasRole } from '../api';
 
 export default function JobDetails() {
   const { id } = useParams();
@@ -13,16 +24,16 @@ export default function JobDetails() {
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [expandedTableId, setExpandedTableId] = useState<number | null>(null);
+  const [actionBusy, setActionBusy] = useState<string | null>(null);
+  const [actionMsg, setActionMsg] = useState<string | null>(null);
+
+  const canControl = hasRole('Admin') || hasRole('Operator');
 
   useEffect(() => {
-    // Initial load
     loadAll();
-
-    // Setup active polling every 2 seconds for live E2E progress updates
     const timer = setInterval(() => {
       pollProgress();
     }, 2000);
-
     return () => clearInterval(timer);
   }, [jobId]);
 
@@ -60,6 +71,29 @@ export default function JobDetails() {
     }
   };
 
+  const runCommand = async (command: string, confirmText?: string) => {
+    if (confirmText && !window.confirm(confirmText)) return;
+    setActionBusy(command);
+    setActionMsg(null);
+    try {
+      await commandJob(jobId, command);
+      setActionMsg(
+        command === 'cancel'
+          ? 'Cancel requested — worker will stop this job shortly.'
+          : command === 'retry_failed'
+            ? 'Retry requested — failed/cancelled work will be re-queued.'
+            : command === 'pause'
+              ? 'Pause requested — no new chunks will be claimed.'
+              : 'Resume requested — job set back to Running.'
+      );
+      await pollProgress();
+    } catch (err: any) {
+      setActionMsg(err.message || `Failed to ${command}`);
+    } finally {
+      setActionBusy(null);
+    }
+  };
+
   if (loading) {
     return <div className="card" style={{ textAlign: 'center', padding: '48px' }}><RefreshCw size={24} className="spin" /></div>;
   }
@@ -76,26 +110,32 @@ export default function JobDetails() {
     );
   }
 
-  // Calculate global aggregate rates from metrics
   const latestMetric = metrics[metrics.length - 1];
   const totalRowsMigrated = job.tableRuns?.reduce((acc: number, t: any) => acc + (t.rowsMigrated || 0), 0) || 0;
   const totalBytesMigrated = job.tableRuns?.reduce((acc: number, t: any) => acc + (t.bytesMigrated || 0), 0) || 0;
 
+  const status = job.status as string;
+  const canCancel = ['Running', 'Queued', 'Paused'].includes(status);
+  const canPause = status === 'Running';
+  const canResume = status === 'Paused';
+  const canRetry = ['Failed', 'Cancelled', 'CompletedWithErrors'].includes(status)
+    || job.tableRuns?.some((t: any) => t.status === 'Failed' || t.status === 'CompletedWithErrors'
+      || t.chunks?.some((c: any) => c.status === 'Failed' || c.status === 'Cancelled'));
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-      {/* Header */}
       <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
         <Link to="/jobs" className="btn btn-secondary" style={{ padding: '8px' }}>
           <ArrowLeft size={18} />
         </Link>
-        <div style={{ display: 'flex', flex: 1, justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ display: 'flex', flex: 1, justifyContent: 'space-between', alignItems: 'center', gap: '16px', flexWrap: 'wrap' }}>
           <div>
             <h1 className="text-gradient" style={{ margin: 0 }}>Job Execution #{jobId}</h1>
             <p style={{ margin: '4px 0 0 0', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
               App: <strong>{job.application?.name}</strong> • Schema: <strong>{job.targetSchema}</strong>
             </p>
           </div>
-          <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
             <span
               style={{
                 padding: '6px 12px',
@@ -103,17 +143,77 @@ export default function JobDetails() {
                 fontSize: '0.8rem',
                 fontWeight: 'bold',
                 textTransform: 'uppercase',
-                background: job.status === 'Running' ? 'rgba(59, 130, 246, 0.1)' : 'rgba(255,255,255,0.05)',
-                color: job.status === 'Running' ? '#60a5fa' : 'var(--text-secondary)'
+                background: status === 'Running' ? 'rgba(59, 130, 246, 0.1)' : 'rgba(255,255,255,0.05)',
+                color: status === 'Running' ? '#60a5fa' : 'var(--text-secondary)'
               }}
             >
               {job.status}
             </span>
+
+            {canControl && canPause && (
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={!!actionBusy}
+                onClick={() => runCommand('pause')}
+                style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.85rem' }}
+              >
+                <Pause size={15} />
+                {actionBusy === 'pause' ? '…' : 'Pause'}
+              </button>
+            )}
+            {canControl && canResume && (
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={!!actionBusy}
+                onClick={() => runCommand('resume')}
+                style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.85rem' }}
+              >
+                <Play size={15} />
+                {actionBusy === 'resume' ? '…' : 'Resume'}
+              </button>
+            )}
+            {canControl && canRetry && (
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={!!actionBusy}
+                onClick={() => runCommand(
+                  'retry_failed',
+                  'Retry failed/cancelled tables and chunks for this job?'
+                )}
+                style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.85rem', color: '#60a5fa', borderColor: 'rgba(96,165,250,0.45)' }}
+              >
+                <RotateCcw size={15} />
+                {actionBusy === 'retry_failed' ? '…' : 'Retry failed'}
+              </button>
+            )}
+            {canControl && canCancel && (
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={!!actionBusy}
+                onClick={() => runCommand(
+                  'cancel',
+                  'Cancel this job?\n\nIn-flight chunks will stop claiming new work. Target tables are not dropped.'
+                )}
+                style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.85rem', color: '#f87171', borderColor: 'rgba(248,113,113,0.4)' }}
+              >
+                <Ban size={15} />
+                {actionBusy === 'cancel' ? '…' : 'Cancel job'}
+              </button>
+            )}
           </div>
         </div>
       </div>
 
-      {/* Global Stat Cards */}
+      {actionMsg && (
+        <div className="card" style={{ padding: '12px 16px', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+          {actionMsg}
+        </div>
+      )}
+
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '16px' }}>
         <div className="card" style={{ padding: '20px' }}>
           <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Rows Migrated</span>
@@ -137,16 +237,14 @@ export default function JobDetails() {
         </div>
       </div>
 
-      {/* Table Runs Grid & Table-wise Progress */}
       <div className="card">
         <h3 style={{ margin: '0 0 16px 0' }}>Table-wise Migration Progress</h3>
-        
+
         <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
           {job.tableRuns?.map((t: any) => {
             const isExpanded = expandedTableId === t.id;
             const validation = validations.find(v => v.tableRunId === t.id);
 
-            // Determine table progress stats
             const totalChunks = t.chunks?.length || 0;
             const completedChunks = t.chunks?.filter((c: any) => c.status === 'Done').length || 0;
             const pctChunks = totalChunks > 0 ? Math.round((completedChunks / totalChunks) * 100) : 0;
@@ -156,7 +254,7 @@ export default function JobDetails() {
             if (t.status === 'Validating') statusColor = '#fbbf24';
             if (t.status === 'Completed') statusColor = '#10b981';
             if (t.status === 'CompletedWithErrors') statusColor = '#f59e0b';
-            if (t.status === 'Failed') statusColor = '#ef4444';
+            if (t.status === 'Failed' || t.status === 'Cancelled') statusColor = '#ef4444';
 
             return (
               <div
@@ -207,10 +305,8 @@ export default function JobDetails() {
                   </div>
                 </div>
 
-                {/* Collapsible Chunk Heatmap and logs */}
                 {isExpanded && (
                   <div style={{ borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '16px', marginTop: '4px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                    {/* Chunk Map Heatmap Grid */}
                     <div>
                       <span style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '8px' }}>
                         Chunk Heatmap ({completedChunks} / {totalChunks} chunks done)
@@ -220,7 +316,7 @@ export default function JobDetails() {
                           let color = 'rgba(255, 255, 255, 0.05)';
                           if (chunk.status === 'Running') color = '#3b82f6';
                           if (chunk.status === 'Done') color = '#10b981';
-                          if (chunk.status === 'Failed') color = '#ef4444';
+                          if (chunk.status === 'Failed' || chunk.status === 'Cancelled') color = '#ef4444';
 
                           return (
                             <div
@@ -239,7 +335,6 @@ export default function JobDetails() {
                       </div>
                     </div>
 
-                    {/* Table-wise stats & validation results */}
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
                       <div className="card" style={{ background: 'rgba(255,255,255,0.01)', border: '1px solid rgba(255,255,255,0.03)', padding: '12px' }}>
                         <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Metrics</span>
@@ -247,6 +342,9 @@ export default function JobDetails() {
                           <div>Rows Load: {t.rowsMigrated?.toLocaleString() || 0}</div>
                           <div>Data Load: {((t.bytesMigrated || 0) / 1024).toFixed(2)} KB</div>
                         </div>
+                        {t.errorMessage && (
+                          <p style={{ margin: '8px 0 0', fontSize: '0.75rem', color: '#f87171' }}>{t.errorMessage}</p>
+                        )}
                       </div>
 
                       <div className="card" style={{ background: 'rgba(255,255,255,0.01)', border: '1px solid rgba(255,255,255,0.03)', padding: '12px' }}>

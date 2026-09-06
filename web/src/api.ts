@@ -293,7 +293,9 @@ export async function commandJob(id: number, command: string, payload?: string) 
     headers: getHeaders(),
     body: JSON.stringify({ command, scope: 'job', payload })
   });
-  if (!res.ok) throw new Error('Failed to send job command');
+  if (!res.ok) {
+    throw new Error(await readErrorMessage(res, `Failed to send job command (${command})`));
+  }
 }
 
 // Admin: cancel every non-terminal job at once and signal the Worker(s) to restart.

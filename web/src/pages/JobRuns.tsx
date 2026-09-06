@@ -1,15 +1,20 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { Activity, RefreshCw, Power } from 'lucide-react';
-import { fetchJobs, cancelAllAndRestartWorker, hasRole } from '../api';
+import { Activity, RefreshCw, Power, Ban, RotateCcw } from 'lucide-react';
+import { fetchJobs, cancelAllAndRestartWorker, commandJob, hasRole } from '../api';
 
 export default function JobRuns() {
   const [jobs, setJobs] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [resetting, setResetting] = useState(false);
+  const [busyJobId, setBusyJobId] = useState<number | null>(null);
+
+  const canControl = hasRole('Admin') || hasRole('Operator');
 
   useEffect(() => {
     loadJobs();
+    const timer = setInterval(() => { loadJobs(); }, 5000);
+    return () => clearInterval(timer);
   }, []);
 
   const loadJobs = async () => {
@@ -38,6 +43,19 @@ export default function JobRuns() {
       alert(err.message || 'Failed to cancel jobs / restart worker');
     } finally {
       setResetting(false);
+    }
+  };
+
+  const runJobCommand = async (jobId: number, command: string, confirmText: string) => {
+    if (!window.confirm(confirmText)) return;
+    setBusyJobId(jobId);
+    try {
+      await commandJob(jobId, command);
+      await loadJobs();
+    } catch (err: any) {
+      alert(err.message || `Failed to ${command}`);
+    } finally {
+      setBusyJobId(null);
     }
   };
 
@@ -70,44 +88,50 @@ export default function JobRuns() {
 
       <div className="card">
         <h3 style={{ margin: '0 0 16px 0' }}>Migration Runs</h3>
-        
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-          {jobs.map(job => (
-            <div
-              key={job.id}
-              className="card"
-              style={{
-                background: 'rgba(255, 255, 255, 0.02)',
-                border: '1px solid rgba(255, 255, 255, 0.05)',
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                padding: '16px'
-              }}
-            >
-              <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
-                <div
-                  style={{
-                    padding: '10px',
-                    borderRadius: '8px',
-                    background: job.status === 'Running' ? 'rgba(59, 130, 246, 0.1)' : 'rgba(255, 255, 255, 0.05)',
-                    color: job.status === 'Running' ? '#60a5fa' : 'var(--text-secondary)',
-                    display: 'flex',
-                    alignItems: 'center'
-                  }}
-                >
-                  <Activity size={20} />
-                </div>
-                <div>
-                  <h4 style={{ margin: 0 }}>Run #{job.id}</h4>
-                  <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                    App: {job.application?.name} • Target Schema: {job.targetSchema}
-                  </span>
-                </div>
-              </div>
 
-              <div style={{ display: 'flex', gap: '24px', alignItems: 'center' }}>
-                <div style={{ textAlign: 'right' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          {jobs.map(job => {
+            const canCancel = ['Running', 'Queued', 'Paused'].includes(job.status);
+            const canRetry = ['Failed', 'Cancelled', 'CompletedWithErrors'].includes(job.status);
+            const busy = busyJobId === job.id;
+
+            return (
+              <div
+                key={job.id}
+                className="card"
+                style={{
+                  background: 'rgba(255, 255, 255, 0.02)',
+                  border: '1px solid rgba(255, 255, 255, 0.05)',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  padding: '16px',
+                  gap: '12px',
+                  flexWrap: 'wrap'
+                }}
+              >
+                <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
+                  <div
+                    style={{
+                      padding: '10px',
+                      borderRadius: '8px',
+                      background: job.status === 'Running' ? 'rgba(59, 130, 246, 0.1)' : 'rgba(255, 255, 255, 0.05)',
+                      color: job.status === 'Running' ? '#60a5fa' : 'var(--text-secondary)',
+                      display: 'flex',
+                      alignItems: 'center'
+                    }}
+                  >
+                    <Activity size={20} />
+                  </div>
+                  <div>
+                    <h4 style={{ margin: 0 }}>Run #{job.id}</h4>
+                    <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                      App: {job.application?.name} • Target Schema: {job.targetSchema}
+                    </span>
+                  </div>
+                </div>
+
+                <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
                   <span
                     style={{
                       padding: '4px 10px',
@@ -120,13 +144,48 @@ export default function JobRuns() {
                   >
                     {job.status}
                   </span>
+
+                  {canControl && canRetry && (
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      disabled={busy}
+                      onClick={() => runJobCommand(
+                        job.id,
+                        'retry_failed',
+                        `Retry failed/cancelled work for job #${job.id}?`
+                      )}
+                      style={{ padding: '6px 10px', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '4px', color: '#60a5fa', borderColor: 'rgba(96,165,250,0.45)' }}
+                    >
+                      <RotateCcw size={14} />
+                      Retry
+                    </button>
+                  )}
+
+                  {canControl && canCancel && (
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      disabled={busy}
+                      onClick={() => runJobCommand(
+                        job.id,
+                        'cancel',
+                        `Cancel job #${job.id}? Target tables are not dropped.`
+                      )}
+                      style={{ padding: '6px 10px', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '4px', color: '#f87171', borderColor: 'rgba(248,113,113,0.4)' }}
+                    >
+                      <Ban size={14} />
+                      Cancel
+                    </button>
+                  )}
+
+                  <Link to={`/jobs/${job.id}`} className="btn btn-secondary" style={{ padding: '6px 12px', fontSize: '0.85rem' }}>
+                    View Details
+                  </Link>
                 </div>
-                <Link to={`/jobs/${job.id}`} className="btn btn-secondary" style={{ padding: '6px 12px', fontSize: '0.85rem' }}>
-                  View Details
-                </Link>
               </div>
-            </div>
-          ))}
+            );
+          })}
 
           {jobs.length === 0 && (
             <div style={{ textAlign: 'center', color: 'var(--text-secondary)', padding: '32px 0' }}>
