@@ -48,6 +48,7 @@ builder.ConfigureServices((hostContext, services) =>
 
     services.AddHostedService<O2P.Worker.Worker>();
     services.AddHostedService<MetricsSamplerService>();
+    services.AddHostedService<WorkerHeartbeatService>();
 });
 
 try

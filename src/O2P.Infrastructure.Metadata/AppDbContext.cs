@@ -34,6 +34,7 @@ namespace O2P.Infrastructure.Metadata
         public DbSet<RunLog> RunLogs { get; set; } = null!;
         public DbSet<TypeMappingRule> TypeMappingRules { get; set; } = null!;
         public DbSet<WorkerControl> WorkerControls { get; set; } = null!;
+        public DbSet<WorkerHeartbeat> WorkerHeartbeats { get; set; } = null!;
 
         protected override void OnModelCreating(ModelBuilder builder)
         {
@@ -218,6 +219,15 @@ namespace O2P.Infrastructure.Metadata
                 b.HasKey(e => e.Id);
                 // Single fixed row (Id = 1); we assign the key explicitly, never auto-generate it.
                 b.Property(e => e.Id).ValueGeneratedNever();
+            });
+
+            builder.Entity<WorkerHeartbeat>(b =>
+            {
+                b.ToTable("worker_heartbeats");
+                b.HasKey(e => e.Id);
+                b.Property(e => e.Id).UseIdentityAlwaysColumn();
+                b.HasIndex(e => e.InstanceId).IsUnique();
+                b.HasIndex(e => e.LastSeenAt);
             });
 
             builder.Entity<TypeMappingRule>(b =>

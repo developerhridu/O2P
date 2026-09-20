@@ -799,6 +799,26 @@ RETURNING c.""Id"";";
                 return;
             }
 
+            // A run with no tables can never finish: a run is complete when its tables are, and it
+            // has none, so it would sit at "Running" forever. The API now refuses to create one, but
+            // runs queued before that rule existed are still in the database. Fail them plainly.
+            if (job.TableRuns.Count == 0)
+            {
+                _logger.LogWarning("Run {JobId} has no tables to copy; marking it Failed instead of leaving it Running.", job.Id);
+                job.Status = "Failed";
+                job.CompletedAt = DateTimeOffset.UtcNow;
+                db.RunEvents.Add(new RunEvent
+                {
+                    JobRunId = job.Id,
+                    Actor = "system",
+                    Event = "job.failed_no_tables",
+                    DetailJson = "{}",
+                    At = DateTimeOffset.UtcNow
+                });
+                await db.SaveChangesAsync(cancellationToken);
+                return;
+            }
+
             var sourceBinding = job.Application.Connections.FirstOrDefault(c => c.Slot == job.SourceSlot);
             var targetBinding = job.Application.Connections.FirstOrDefault(c => c.Slot == job.TargetSlot);
             if (sourceBinding == null || targetBinding == null)

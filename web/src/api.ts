@@ -355,7 +355,25 @@ export async function createJob(job: any) {
     headers: getHeaders(),
     body: JSON.stringify(job)
   });
-  if (!res.ok) throw new Error('Could not create the run.');
+  // Surface the server's reason: it says things like "no tables ticked", which the user can act on.
+  if (!res.ok) throw new Error(await readErrorMessage(res, 'Could not create the run.'));
+  return res.json();
+}
+
+export type WorkerStatus = {
+  running: boolean;
+  count: number;
+  multiple: boolean;
+  workers: { host: string; processId: number; startedAt: string; lastSeenAt: string }[];
+  staleAfterSeconds: number;
+  serverTime: string;
+};
+
+// Whether anything is processing runs. A run just says "Waiting" when the Worker is not running,
+// with no hint why - this is what lets the screen say so.
+export async function fetchWorkerStatus(): Promise<WorkerStatus> {
+  const res = await apiFetch(`${API_BASE}/workers/status`, { headers: getHeaders() });
+  if (!res.ok) throw new Error('Could not check whether the copier is running.');
   return res.json();
 }
 

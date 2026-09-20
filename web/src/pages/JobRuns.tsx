@@ -3,6 +3,8 @@ import { Link } from 'react-router-dom';
 import { Activity, RefreshCw, Power, Ban, RotateCcw } from 'lucide-react';
 import { fetchJobs, cancelAllAndRestartWorker, commandJob, hasRole } from '../api';
 import { commandLabel, statusColor, statusLabel } from '../labels';
+import { useWorkerStatus } from '../useWorkerStatus';
+import { WorkerBanner, WorkerChip } from '../components/WorkerStatus';
 
 export default function JobRuns() {
   const [jobs, setJobs] = useState<any[]>([]);
@@ -11,6 +13,7 @@ export default function JobRuns() {
   const [busyJobId, setBusyJobId] = useState<number | null>(null);
 
   const canControl = hasRole('Admin') || hasRole('Operator');
+  const worker = useWorkerStatus();
 
   useEffect(() => {
     loadJobs();
@@ -72,6 +75,7 @@ export default function JobRuns() {
           <p style={{ margin: '4px 0 0 0', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
             Watch runs in progress and review past ones.
           </p>
+          <div style={{ marginTop: '10px' }}><WorkerChip status={worker} /></div>
         </div>
         {hasRole('Admin') && (
           <button
@@ -86,6 +90,11 @@ export default function JobRuns() {
           </button>
         )}
       </div>
+
+      <WorkerBanner
+        status={worker}
+        waitingRuns={jobs.filter((j) => ['Queued', 'Running', 'Paused'].includes(j.status)).length}
+      />
 
       <div className="card">
         <h3 style={{ margin: '0 0 16px 0' }}>All runs</h3>

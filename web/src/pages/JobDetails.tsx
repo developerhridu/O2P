@@ -14,10 +14,13 @@ import {
 } from 'lucide-react';
 import { commandJob, fetchJob, fetchMetrics, fetchValidation, hasRole } from '../api';
 import { commandLabel, statusColor, statusLabel } from '../labels';
+import { useWorkerStatus } from '../useWorkerStatus';
+import { WorkerBanner } from '../components/WorkerStatus';
 
 export default function JobDetails() {
   const { id } = useParams();
   const jobId = Number(id);
+  const worker = useWorkerStatus();
 
   const [job, setJob] = useState<any>(null);
   const [metrics, setMetrics] = useState<any[]>([]);
@@ -207,6 +210,15 @@ export default function JobDetails() {
           </div>
         </div>
       </div>
+
+      <WorkerBanner status={worker} waitingRuns={['Queued', 'Running', 'Paused'].includes(status) ? 1 : 0} />
+
+      {status === 'Failed' && (job.tableRuns?.length ?? 0) === 0 && (
+        <div className="card" style={{ padding: '12px 16px', color: '#fca5a5', fontSize: '0.9rem' }}>
+          No tables were selected for this run, so nothing was copied. Open the table selection, tick the tables you
+          want, save it, and start a new run.
+        </div>
+      )}
 
       {actionMsg && (
         <div className="card" style={{ padding: '12px 16px', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>

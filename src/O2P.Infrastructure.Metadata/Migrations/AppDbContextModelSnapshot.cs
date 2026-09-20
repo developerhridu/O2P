@@ -1119,6 +1119,41 @@ namespace O2P.Infrastructure.Metadata.Migrations
                     b.ToTable("ValidationResults", "o2p");
                 });
 
+            modelBuilder.Entity("O2P.Domain.Entities.WorkerHeartbeat", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityAlwaysColumn(b.Property<long>("Id"));
+
+                    b.Property<string>("Host")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("InstanceId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTimeOffset>("LastSeenAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("ProcessId")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTimeOffset>("StartedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("InstanceId")
+                        .IsUnique();
+
+                    b.HasIndex("LastSeenAt");
+
+                    b.ToTable("worker_heartbeats", "o2p");
+                });
+
             modelBuilder.Entity("O2P.Domain.Entities.WorkerControl", b =>
                 {
                     b.Property<int>("Id")

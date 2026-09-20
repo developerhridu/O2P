@@ -82,6 +82,14 @@ namespace O2P.Api.Controllers
                 return BadRequest("That migration or table selection does not exist.");
             }
 
+            // A run copies the tables that are ticked when it starts. With none ticked it would have
+            // nothing to do - and would never finish, since a run is only complete once its tables
+            // are. Refuse it here, where the reason can still be explained, rather than queue it.
+            if (!manifest.Tables.Any(t => t.Included))
+            {
+                return BadRequest("This table selection has no tables ticked, so there is nothing to copy. Open it, tick at least one table, save it, and start the run again.");
+            }
+
             // Create JobRun
             var job = new JobRun
             {
@@ -228,6 +236,46 @@ namespace O2P.Api.Controllers
                 return BadRequest("That action is not recognised.");
             }
 
+            var now = DateTimeOffset.UtcNow;
+
+            // Cancelling a run that has not started is settled here, straight away. Commands are
+            // carried out by the Worker, so if none is running the cancel would sit unprocessed
+            // forever and the run would stay "Waiting" no matter how often it was clicked.
+            //
+            // It is a conditional update on Status = 'Queued', so it cannot clobber a run the Worker
+            // has just started: if the Worker got there first, no row matches and this falls through
+            // to the normal command, which the Worker handles as it always did. A queued run has no
+            // batches and has suspended no constraints, so there is nothing else to undo.
+            var cancelledHere = false;
+            if (request.Command == "cancel")
+            {
+                var cancelled = await _db.JobRuns
+                    .Where(j => j.Id == id && j.Status == "Queued")
+                    .ExecuteUpdateAsync(s => s
+                        .SetProperty(j => j.Status, "Cancelled")
+                        .SetProperty(j => j.CompletedAt, now));
+
+                if (cancelled > 0)
+                {
+                    cancelledHere = true;
+                    await _db.TableRuns
+                        .Where(t => t.JobRunId == id && (t.Status == "Pending"))
+                        .ExecuteUpdateAsync(s => s
+                            .SetProperty(t => t.Status, "Cancelled")
+                            .SetProperty(t => t.CompletedAt, now)
+                            .SetProperty(t => t.ErrorMessage, "Cancelled before it started."));
+
+                    _db.RunEvents.Add(new RunEvent
+                    {
+                        JobRunId = id,
+                        Actor = User.Identity?.Name ?? "system",
+                        Event = "job.cancelled_before_start",
+                        DetailJson = "{}",
+                        At = now
+                    });
+                }
+            }
+
             _db.JobCommands.Add(new JobCommand
             {
                 JobRunId = id,
@@ -235,7 +283,9 @@ namespace O2P.Api.Controllers
                 Command = request.Command,
                 Payload = request.Payload,
                 IssuedBy = User.Identity?.Name ?? "system",
-                IssuedAt = DateTimeOffset.UtcNow
+                IssuedAt = now,
+                // Already carried out above, so a Worker that starts later does not repeat it.
+                ProcessedAt = cancelledHere ? now : null
             });
 
             await _db.SaveChangesAsync();
