@@ -30,6 +30,14 @@ namespace O2P.Domain.Entities
         /// </summary>
         public bool? TargetTablePreExisted { get; set; }
 
+        /// <summary>
+        /// Which spelling this run uses for destination column names: "lower" for a table O2P created
+        /// (or found already in lower case), "source" for one an earlier run left behind under Oracle's
+        /// own upper-case spelling. Resolved once when the table is prepared and frozen for the whole
+        /// run, so every batch agrees. Null on runs recorded before this was tracked, read as "source".
+        /// </summary>
+        public string? TargetNameStyle { get; set; }
+
         public DateTimeOffset? StartedAt { get; set; }
         public DateTimeOffset? CompletedAt { get; set; }
 

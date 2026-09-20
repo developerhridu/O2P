@@ -31,7 +31,20 @@ namespace O2P.Application.Schema
     /// </summary>
     public static class TargetSchemaComparer
     {
-        public static IReadOnlyList<SchemaMismatch> Compare(ManifestTable manifest, IReadOnlyList<PostgresLiveColumn> liveColumns)
+        /// <summary>
+        /// Compares against a table whose columns are spelled exactly as Oracle spells them - the only
+        /// case before destination names were lower-cased, and still the case for a table an earlier
+        /// run created.
+        /// </summary>
+        public static IReadOnlyList<SchemaMismatch> Compare(ManifestTable manifest, IReadOnlyList<PostgresLiveColumn> liveColumns) =>
+            Compare(manifest, liveColumns, PostgresName.SourceStyle);
+
+        /// <param name="style">
+        /// Which spelling the destination uses for this run: <see cref="PostgresName.LowerStyle"/> for a
+        /// table O2P creates now or one already in lower case, <see cref="PostgresName.SourceStyle"/>
+        /// for one an earlier run left behind. Resolved once per table run and frozen there.
+        /// </param>
+        public static IReadOnlyList<SchemaMismatch> Compare(ManifestTable manifest, IReadOnlyList<PostgresLiveColumn> liveColumns, string? style)
         {
             var problems = new List<SchemaMismatch>();
 
@@ -46,18 +59,21 @@ namespace O2P.Application.Schema
                 .GroupBy(c => c.ColumnName, StringComparer.Ordinal)
                 .ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
 
-            // Ordinal, not case-insensitive: SqlIdentifier.QuotePostgres always double-quotes, so
-            // "EMP_ID" binds only to a column physically named EMP_ID.
+            // Ordinal, not case-insensitive: SqlIdentifier.QuotePostgres always double-quotes, so a
+            // name binds only to a column physically spelled that way. Folding upper to lower is a
+            // decision taken once per run (the style), never a guess made per column here.
             var accountedFor = new HashSet<string>(StringComparer.Ordinal);
 
             foreach (var column in manifestColumns)
             {
-                if (!liveByName.TryGetValue(column.ColumnName, out var live))
+                var targetName = PostgresName.TargetColumn(column, style);
+
+                if (!liveByName.TryGetValue(targetName, out var live))
                 {
                     problems.Add(new SchemaMismatch(
-                        column.ColumnName,
+                        targetName,
                         MismatchSeverity.Fail,
-                        DescribeMissing(column.ColumnName, liveColumns, out var nearMiss)));
+                        DescribeMissing(targetName, column.ColumnName, liveColumns, out var nearMiss)));
 
                     // Claim the near-miss so it is not also reported as a stray extra column.
                     if (nearMiss != null) accountedFor.Add(nearMiss.ColumnName);
@@ -66,7 +82,7 @@ namespace O2P.Application.Schema
 
                 accountedFor.Add(live.ColumnName);
 
-                var typeProblem = CompareTypes(column, live);
+                var typeProblem = CompareTypes(column, targetName, live);
                 if (typeProblem != null) problems.Add(typeProblem);
 
                 if (live.NotNull && column.IsNullable)
@@ -74,9 +90,9 @@ namespace O2P.Application.Schema
                     // Data-dependent, not structural: "Oracle permits nulls" is not "contains nulls",
                     // and failing here would block plenty of tables that load perfectly well.
                     problems.Add(new SchemaMismatch(
-                        column.ColumnName,
+                        targetName,
                         MismatchSeverity.Warn,
-                        $"column \"{column.ColumnName}\": the destination requires a value but the source allows empty ones; a null row would abort the load"));
+                        $"column \"{targetName}\": the destination requires a value but the source allows empty ones; a null row would abort the load"));
                 }
             }
 
@@ -99,13 +115,17 @@ namespace O2P.Application.Schema
 
         private static string DescribeMissing(
             string columnName,
+            string sourceColumnName,
             IReadOnlyList<PostgresLiveColumn> liveColumns,
             out PostgresLiveColumn? nearMiss)
         {
-            // Oracle discovery yields UPPERCASE names while hand-built Postgres tables are
-            // conventionally lowercase, so this is the mismatch operators will hit most. Name the
-            // real spelling instead of just saying "missing" - but never fold automatically, which
-            // would silently redirect the load.
+            // Name the real spelling instead of just saying "missing" - but never fold automatically,
+            // which would silently redirect the load. Ordinary upper/lower case is handled by the run's
+            // style, so what reaches here is a genuinely odd spelling worth spelling out.
+            var from = string.Equals(columnName, sourceColumnName, StringComparison.Ordinal)
+                ? string.Empty
+                : $" (from \"{sourceColumnName}\")";
+
             var candidates = liveColumns
                 .Where(c => string.Equals(c.ColumnName, columnName, StringComparison.OrdinalIgnoreCase))
                 .ToList();
@@ -113,14 +133,14 @@ namespace O2P.Application.Schema
             if (candidates.Count == 1)
             {
                 nearMiss = candidates[0];
-                return $"column \"{columnName}\": not found in the destination table; the destination has \"{candidates[0].ColumnName}\" - names are case-sensitive because the loader quotes every identifier";
+                return $"column \"{columnName}\"{from}: not found in the destination table; the destination has \"{candidates[0].ColumnName}\" - names are case-sensitive because the loader quotes every identifier";
             }
 
             nearMiss = null;
-            return $"column \"{columnName}\": not found in the destination table";
+            return $"column \"{columnName}\"{from}: not found in the destination table";
         }
 
-        private static SchemaMismatch? CompareTypes(ManifestColumn column, PostgresLiveColumn live)
+        private static SchemaMismatch? CompareTypes(ManifestColumn column, string targetName, PostgresLiveColumn live)
         {
             var source = PostgresType.Parse(column.PostgresDataType);
             var target = PostgresType.Parse(live.FormattedType);
@@ -130,9 +150,9 @@ namespace O2P.Application.Schema
             if (reason == null) return null;
 
             return new SchemaMismatch(
-                column.ColumnName,
+                targetName,
                 severity,
-                $"column \"{column.ColumnName}\": the selected table needs {column.PostgresDataType}, the destination is {live.FormattedType} - {reason}");
+                $"column \"{targetName}\": the selected table needs {column.PostgresDataType}, the destination is {live.FormattedType} - {reason}");
         }
 
         private static string? Classify(PostgresType source, PostgresType target, ref MismatchSeverity severity)

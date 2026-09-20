@@ -307,6 +307,7 @@ RETURNING c.""Id"";";
                     pendingChunk.TableRun.JobRun.TargetSchema,
                     pendingChunk.TableRun.TargetTableName,
                     pendingChunk.TableRun.ManifestTable.Columns.Where(c => !c.IsExcluded).OrderBy(c => c.Id).ToList(),
+                    pendingChunk.TableRun.TargetNameStyle,
                     pendingChunk.TableRun.JobRunId,
                     pendingChunk.TableRunId,
                     pendingChunk.ChunkIndex,

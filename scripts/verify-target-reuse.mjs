@@ -16,6 +16,18 @@ const PG_PORT = Number(process.env.O2P_PG_PORT || 7936);
 const PG_PASSWORD = process.env.O2P_PG_PASSWORD || 'change-me-local-only';
 const SCHEMA = 'target_test';
 
+// This script drops and recreates a schema and runs real jobs, so it must never be aimed at a normal
+// stack. Same guard as the other verify scripts.
+// console.log, not the log() helper below: this runs before it is initialised.
+if (['5000', '5151', '3051', '3052'].includes(new URL(API).port)) {
+  console.log(`Refusing to run against ${API}: that is a normal dev/deploy port.`);
+  process.exit(2);
+}
+if (String(PG_PORT) === '5432') {
+  console.log('Refusing to touch a database on port 5432: that is not the throwaway one.');
+  process.exit(2);
+}
+
 let token = null;
 let failures = 0;
 const log = (m) => process.stdout.write(m + '\n');
@@ -109,14 +121,27 @@ async function main() {
 
   const tables = psql(`SELECT relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='${SCHEMA}' AND c.relkind='r' ORDER BY relname;`).split('\n').filter(Boolean);
   assert(tables.length >= 2, 'A: tables physically created', `found=${tables.join(',')}`);
-  const custRows = Number(psql(`SELECT count(*) FROM ${SCHEMA}."CUSTOMERS";`));
-  assert(custRows > 0, 'A: CUSTOMERS holds rows', `rows=${custRows}`);
+  const custRows = Number(psql(`SELECT count(*) FROM ${SCHEMA}.customers;`));
+  assert(custRows > 0, 'A: customers holds rows', `rows=${custRows}`);
+
+  // The point of lower-casing: the copied table can be typed without quotes. The source is Oracle's
+  // CUSTOMERS/ORDERS, so anything upper case left in the schema means the rule was not applied.
+  const dataTables = tables.filter(t => !t.startsWith('_o2p_'));
+  assert(dataTables.every(t => t === t.toLowerCase()), 'A: every created table is lower case', `found=${dataTables.join(',')}`);
+  const custCols = psql(`SELECT a.attname FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='${SCHEMA}' AND c.relname='customers' AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum;`).split('\n').filter(Boolean);
+  assert(custCols.length > 0 && custCols.every(c => c === c.toLowerCase()), 'A: every created column is lower case', `found=${custCols.join(',')}`);
+  // Unquoted on purpose - Postgres folds these to lower case, so this only parses if the names really
+  // are lower case. Quoting them would pass either way and prove nothing.
+  const unquoted = Number(psql(`SELECT count(*) FROM ${SCHEMA}.customers WHERE ${custCols[0]} IS NOT NULL OR ${custCols[0]} IS NULL;`));
+  assert(unquoted === custRows, 'A: the table is queryable with no quoting at all', `rows=${unquoted} expected=${custRows}`);
+  const styleA = psql(`SELECT coalesce("TargetNameStyle",'NULL') FROM o2p.table_runs WHERE "Id"=${job.tableRuns[0].id};`);
+  assert(styleA === 'lower', 'A: the run recorded the lower-case style', `got=${styleA}`);
 
   // ---------------------------------------------------------------- PATH B
   log('\n[Path B] target table present and matching -> reused, no DDL, truncate+reload');
-  psql(`COMMENT ON TABLE ${SCHEMA}."CUSTOMERS" IS 'operator-owned comment';`);
-  psql(`ALTER TABLE ${SCHEMA}."CUSTOMERS" ADD COLUMN extra_note text;`);
-  psql(`ALTER TABLE ${SCHEMA}."CUSTOMERS" ADD CONSTRAINT ck_extra CHECK (extra_note IS NULL OR length(extra_note) < 500);`);
+  psql(`COMMENT ON TABLE ${SCHEMA}.customers IS 'operator-owned comment';`);
+  psql(`ALTER TABLE ${SCHEMA}.customers ADD COLUMN extra_note text;`);
+  psql(`ALTER TABLE ${SCHEMA}.customers ADD CONSTRAINT ck_extra CHECK (extra_note IS NULL OR length(extra_note) < 500);`);
   ok('B: added comment, nullable column and CHECK to the existing table');
 
   job = await runJobToTerminal(appId, manifestId, 'B');
@@ -126,38 +151,38 @@ async function main() {
   assert(job.tableRuns.every(t => t.targetTablePreExisted === true), 'B: every table reported as reused',
     JSON.stringify(job.tableRuns.map(t => [t.targetTableName, t.targetTablePreExisted])));
 
-  const comment = psql(`SELECT obj_description('${SCHEMA}."CUSTOMERS"'::regclass, 'pg_class');`);
+  const comment = psql(`SELECT obj_description('${SCHEMA}.customers'::regclass, 'pg_class');`);
   assert(comment === 'operator-owned comment', 'B: operator comment survived (no table recreate)', `got=${comment}`);
-  const extraCol = psql(`SELECT count(*) FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='${SCHEMA}' AND c.relname='CUSTOMERS' AND a.attname='extra_note' AND NOT a.attisdropped;`);
+  const extraCol = psql(`SELECT count(*) FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='${SCHEMA}' AND c.relname='customers' AND a.attname='extra_note' AND NOT a.attisdropped;`);
   assert(extraCol === '1', 'B: operator-added column survived', `count=${extraCol}`);
-  const chk = psql(`SELECT count(*) FROM pg_constraint WHERE conname='ck_extra' AND conrelid='${SCHEMA}."CUSTOMERS"'::regclass;`);
+  const chk = psql(`SELECT count(*) FROM pg_constraint WHERE conname='ck_extra' AND conrelid='${SCHEMA}.customers'::regclass;`);
   assert(chk === '1', 'B: CHECK constraint restored after load', `count=${chk}`);
   // Compare against a second reuse run rather than against path A: a partial path A (see the
   // known _o2p_chunk_log creation race) would otherwise make this look like duplication.
-  const custRowsB = Number(psql(`SELECT count(*) FROM ${SCHEMA}."CUSTOMERS";`));
+  const custRowsB = Number(psql(`SELECT count(*) FROM ${SCHEMA}.customers;`));
   const jobB2 = await runJobToTerminal(appId, manifestId, 'B2');
-  const custRowsB2 = Number(psql(`SELECT count(*) FROM ${SCHEMA}."CUSTOMERS";`));
+  const custRowsB2 = Number(psql(`SELECT count(*) FROM ${SCHEMA}.customers;`));
   assert(jobB2?.status === 'Completed', 'B: second reuse run Completed', `status=${jobB2?.status}`);
   assert(custRowsB2 === custRowsB, 'B: truncate+reload is repeatable (no duplicates)', `run1=${custRowsB} run2=${custRowsB2}`);
 
   // ---------------------------------------------------------------- PATH C
   log('\n[Path C] target table present but mismatching -> only that table fails, data untouched');
   // Break ORDERS deliberately. Narrow a column and add a mandatory one.
-  const ordersCols = psql(`SELECT a.attname || ' ' || format_type(a.atttypid,a.atttypmod) FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='${SCHEMA}' AND c.relname='ORDERS' AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum;`);
+  const ordersCols = psql(`SELECT a.attname || ' ' || format_type(a.atttypid,a.atttypmod) FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='${SCHEMA}' AND c.relname='orders' AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum;`);
   log(`      ORDERS columns before breaking:\n        ${ordersCols.split('\n').join('\n        ')}`);
 
-  psql(`ALTER TABLE ${SCHEMA}."ORDERS" ADD COLUMN tenant_id integer NOT NULL DEFAULT 0;`);
-  psql(`ALTER TABLE ${SCHEMA}."ORDERS" ALTER COLUMN tenant_id DROP DEFAULT;`);
+  psql(`ALTER TABLE ${SCHEMA}.orders ADD COLUMN tenant_id integer NOT NULL DEFAULT 0;`);
+  psql(`ALTER TABLE ${SCHEMA}.orders ALTER COLUMN tenant_id DROP DEFAULT;`);
   ok('C: added a mandatory tenant_id column with no default to ORDERS');
 
-  const ordersRowsBefore = Number(psql(`SELECT count(*) FROM ${SCHEMA}."ORDERS";`));
+  const ordersRowsBefore = Number(psql(`SELECT count(*) FROM ${SCHEMA}.orders;`));
   log(`      ORDERS row count before the mismatching run: ${ordersRowsBefore}`);
 
   job = await runJobToTerminal(appId, manifestId, 'C');
   if (!job) { log('\nAborting: path C did not finish.'); process.exit(1); }
 
-  const ordersRun = job.tableRuns.find(t => t.targetTableName === 'ORDERS');
-  const otherRuns = job.tableRuns.filter(t => t.targetTableName !== 'ORDERS');
+  const ordersRun = job.tableRuns.find(t => t.targetTableName === 'orders');
+  const otherRuns = job.tableRuns.filter(t => t.targetTableName !== 'orders');
 
   assert(ordersRun?.status === 'Failed', 'C: ORDERS failed', `status=${ordersRun?.status}`);
   assert(otherRuns.every(t => t.status === 'Completed'), 'C: every other table still Completed',
@@ -168,7 +193,7 @@ async function main() {
   assert(/tenant_id/.test(ordersRun?.errorMessage || ''), 'C: message names the offending column', `errorMessage=${ordersRun?.errorMessage}`);
   log(`      ORDERS errorMessage:\n        ${(ordersRun?.errorMessage || '').split('\n').join('\n        ')}`);
 
-  const ordersRowsAfter = Number(psql(`SELECT count(*) FROM ${SCHEMA}."ORDERS";`));
+  const ordersRowsAfter = Number(psql(`SELECT count(*) FROM ${SCHEMA}.orders;`));
   assert(ordersRowsAfter === ordersRowsBefore, 'C: ORDERS rows NOT truncated', `before=${ordersRowsBefore} after=${ordersRowsAfter}`);
 
   const snapshot = psql(`SELECT coalesce("ConstraintSnapshotJson"::text,'NULL') FROM o2p.table_runs WHERE "Id"=${ordersRun.id};`);
@@ -185,12 +210,12 @@ async function main() {
   for (let i = 0; i < 60; i++) {
     await sleep(2000);
     const jr = await api('GET', `/api/v1/jobs/${job.id}`);
-    const run = jr.data?.tableRuns?.find(t => t.targetTableName === 'ORDERS');
+    const run = jr.data?.tableRuns?.find(t => t.targetTableName === 'orders');
     if (run?.status === 'Failed' && ['Completed', 'CompletedWithErrors', 'Failed'].includes(jr.data.status)) { retried = run; break; }
   }
   assert(retried != null, 'C-retry: ORDERS failed again', 'never settled');
 
-  const ordersRowsRetry = Number(psql(`SELECT count(*) FROM ${SCHEMA}."ORDERS";`));
+  const ordersRowsRetry = Number(psql(`SELECT count(*) FROM ${SCHEMA}.orders;`));
   assert(ordersRowsRetry === ordersRowsBefore, 'C-retry: ORDERS rows STILL not truncated (stale-snapshot regression)',
     `before=${ordersRowsBefore} after=${ordersRowsRetry}`);
 
@@ -198,22 +223,82 @@ async function main() {
   log('\n[Path D] type mismatch on an existing table (timestamp(0) -> date)');
   // Oracle DATE maps to timestamp(0); hand-built Postgres targets commonly use date. 8 bytes into
   // a 4-byte date_recv would abort mid-COPY, so it has to be caught before the truncate.
-  psql(`ALTER TABLE ${SCHEMA}."ORDERS" DROP COLUMN tenant_id;`);
-  psql(`ALTER TABLE ${SCHEMA}."ORDERS" DROP COLUMN "CREATED_AT";`);
-  psql(`ALTER TABLE ${SCHEMA}."ORDERS" ADD COLUMN "CREATED_AT" date;`);
-  ok('D: retyped ORDERS."CREATED_AT" from timestamp(0) to date');
+  psql(`ALTER TABLE ${SCHEMA}.orders DROP COLUMN tenant_id;`);
+  psql(`ALTER TABLE ${SCHEMA}.orders DROP COLUMN created_at;`);
+  psql(`ALTER TABLE ${SCHEMA}.orders ADD COLUMN created_at date;`);
+  ok('D: retyped orders.created_at from timestamp(0) to date');
 
-  const ordersRowsD = Number(psql(`SELECT count(*) FROM ${SCHEMA}."ORDERS";`));
+  const ordersRowsD = Number(psql(`SELECT count(*) FROM ${SCHEMA}.orders;`));
   job = await runJobToTerminal(appId, manifestId, 'D');
   if (!job) { log('\nAborting: path D did not finish.'); process.exit(1); }
 
-  const ordersRunD = job.tableRuns.find(t => t.targetTableName === 'ORDERS');
+  const ordersRunD = job.tableRuns.find(t => t.targetTableName === 'orders');
   assert(ordersRunD?.status === 'Failed', 'D: ORDERS failed on the type mismatch', `status=${ordersRunD?.status}`);
-  assert(/CREATED_AT/.test(ordersRunD?.errorMessage || ''), 'D: message names CREATED_AT', `errorMessage=${ordersRunD?.errorMessage}`);
+  assert(/created_at/.test(ordersRunD?.errorMessage || ''), 'D: message names created_at', `errorMessage=${ordersRunD?.errorMessage}`);
   assert(/date/.test(ordersRunD?.errorMessage || ''), 'D: message names the target type', `errorMessage=${ordersRunD?.errorMessage}`);
   log(`      ORDERS errorMessage:\n        ${(ordersRunD?.errorMessage || '').split('\n').join('\n        ')}`);
-  assert(Number(psql(`SELECT count(*) FROM ${SCHEMA}."ORDERS";`)) === ordersRowsD, 'D: ORDERS rows NOT truncated',
+  assert(Number(psql(`SELECT count(*) FROM ${SCHEMA}.orders;`)) === ordersRowsD, 'D: ORDERS rows NOT truncated',
     `before=${ordersRowsD}`);
+
+  // ---------------------------------------------------------------- PATH E
+  log('\n[Path E] a table an EARLIER run created, in upper case -> reused in place, not duplicated');
+  // This is the upgrade case: your destination already holds "BSSTBLBIOMETRICARC_HIST" and friends
+  // from runs made before names were lower-cased. Finding only the lower-case name would build a
+  // second table beside each one and leave the first holding a stale full copy.
+  psql(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE; CREATE SCHEMA ${SCHEMA};`);
+  const seeded = await runJobToTerminal(appId, manifestId, 'E-seed');
+  if (seeded?.status !== 'Completed') { fail('E: seed run Completed', `status=${seeded?.status}`); }
+
+  // Rename what that run just built, rather than hand-writing the DDL: the tables then match the
+  // manifest exactly, the way a table left by an older O2P would, and this keeps matching if the
+  // mock source ever changes. Then empty them, so rows afterwards prove the load really went here.
+  psql(`DO $$
+DECLARE t record; c record;
+BEGIN
+  FOR t IN SELECT relname FROM pg_class k JOIN pg_namespace n ON n.oid = k.relnamespace
+           WHERE n.nspname = '${SCHEMA}' AND k.relkind = 'r' AND k.relname NOT LIKE '\\_o2p\\_%' LOOP
+    FOR c IN SELECT attname FROM pg_attribute
+             WHERE attrelid = ('${SCHEMA}.' || quote_ident(t.relname))::regclass AND attnum > 0 AND NOT attisdropped LOOP
+      EXECUTE format('ALTER TABLE ${SCHEMA}.%I RENAME COLUMN %I TO %I', t.relname, c.attname, upper(c.attname));
+    END LOOP;
+    EXECUTE format('TRUNCATE TABLE ${SCHEMA}.%I', t.relname);
+    EXECUTE format('ALTER TABLE ${SCHEMA}.%I RENAME TO %I', t.relname, upper(t.relname));
+  END LOOP;
+END $$;`);
+  const plantedE = psql(`SELECT relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='${SCHEMA}' AND c.relkind='r' AND relname NOT LIKE '\\_o2p\\_%' ORDER BY relname;`).split('\n').filter(Boolean);
+  assert(plantedE.length === 2 && plantedE.every(t => t === t.toUpperCase()),
+    'E: planted upper-case tables as an earlier version of O2P would have left them', `found=${plantedE.join(',')}`);
+
+  job = await runJobToTerminal(appId, manifestId, 'E');
+  if (!job) { log('\nAborting: path E did not finish.'); process.exit(1); }
+
+  assert(job.status === 'Completed', 'E: job Completed', `status=${job.status}`);
+  assert(job.tableRuns.every(t => t.targetTablePreExisted === true), 'E: every table reported as reused',
+    JSON.stringify(job.tableRuns.map(t => [t.targetTableName, t.targetTablePreExisted, t.status, t.errorMessage])));
+  assert(job.tableRuns.every(t => t.targetTableName === t.targetTableName.toUpperCase()),
+    'E: the run kept the upper-case names', JSON.stringify(job.tableRuns.map(t => t.targetTableName)));
+
+  const afterE = psql(`SELECT relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='${SCHEMA}' AND c.relkind='r' AND relname NOT LIKE '\\_o2p\\_%' ORDER BY relname;`).split('\n').filter(Boolean);
+  assert(afterE.length === 2, 'E: no second table was created beside them', `found=${afterE.join(',')}`);
+  assert(Number(psql(`SELECT count(*) FROM ${SCHEMA}."CUSTOMERS";`)) > 0, 'E: rows landed in the existing upper-case table');
+  const styleE = psql(`SELECT coalesce("TargetNameStyle",'NULL') FROM o2p.table_runs WHERE "Id"=${job.tableRuns[0].id};`);
+  assert(styleE === 'source', 'E: the run recorded the source style', `got=${styleE}`);
+
+  // ---------------------------------------------------------------- PATH F
+  log('\n[Path F] two source tables differing only in case -> refused when the run is created');
+  // Both would become one lower-case name. Left unchecked this surfaces mid-run as a unique-index
+  // violation on table_runs, which says nothing about what caused it.
+  r = await api('POST', `/api/v1/applications/${appId}/manifests`, { name: uniq('case-clash-'), version: 1 });
+  const clashId = r.data?.id;
+  await api('PUT', `/api/v1/manifests/${clashId}/tables`, [
+    { owner: 'APP', tableName: 'CUSTOMERS', included: true, columns: [] },
+    { owner: 'APP', tableName: 'Customers', included: true, columns: [] },
+  ]);
+  r = await api('POST', '/api/v1/jobs', { applicationId: appId, manifestId: clashId, sourceSlot: 'oracle_test', targetSlot: 'pg_test', targetSchema: SCHEMA });
+  assert(r.status === 400, 'F: the run is refused', `status=${r.status} body=${JSON.stringify(r.data)}`);
+  assert(/differ only in upper and lower case/.test(String(r.data)), 'F: the message explains why', `body=${JSON.stringify(r.data)}`);
+  assert(/"CUSTOMERS" and "Customers"/.test(String(r.data)), 'F: the message names both tables', `body=${JSON.stringify(r.data)}`);
+  log(`      refusal:\n        ${String(r.data)}`);
 
   log(`\n=== SUMMARY ===\nFAIL: ${failures}\n`);
   process.exit(failures ? 1 : 0);

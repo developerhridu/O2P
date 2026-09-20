@@ -58,7 +58,7 @@ This guide walks you through the O2P web interface from the sign-in page to a ve
 
 For each table in your table selection, O2P creates the PostgreSQL table if it does not exist (columns and NULL/NOT NULL only) or reuses it unchanged if it does, splits the Oracle table into up to 16 batches, copies the batches in parallel using PostgreSQL binary `COPY`, and compares the Oracle row count with the PostgreSQL row count at the end.
 
-> **Warning — destructive to existing target tables.** If a table with the same name already exists in the target schema, O2P leaves its schema alone but **drops its PK/UNIQUE/FK/CHECK constraints, runs `TRUNCATE TABLE … RESTART IDENTITY CASCADE`, loads the data and then re-creates the constraints.** Existing rows are deleted. Take a backup and rehearse against a non-production target first.
+> **Warning — destructive to existing target tables.** If a matching table already exists in the target schema — under the lower-case name, or under the upper-case name an older version of O2P created — O2P leaves its schema alone but **drops its PK/UNIQUE/FK/CHECK constraints, runs `TRUNCATE TABLE … RESTART IDENTITY CASCADE`, loads the data and then re-creates the constraints.** Existing rows are deleted. Take a backup and rehearse against a non-production target first.
 >
 > O2P first checks that the existing table can actually accept the data. If it cannot, **that table is left completely untouched** — not truncated, not altered — and fails with a message listing each problem. The job's other tables carry on.
 
@@ -443,7 +443,7 @@ There is **no UI to change column types or exclude columns**; O2P chooses automa
 
 > **Check these types manually.** `TIMESTAMP WITH TIME ZONE`, `TIMESTAMP WITH LOCAL TIME ZONE` and `INTERVAL` columns may **not** map as intended (time-zone information can be lost, and INTERVAL columns may fail to load). Also review any table with `XMLTYPE`, `BFILE` or very large LOBs on a small test table before the real run.
 
-**Names are not converted.** Table and column names keep their Oracle upper-case spelling and are created quoted, so in PostgreSQL you must write `SELECT * FROM "HR"."EMPLOYEES"`. The target table always has the same name as the source table.
+**Names are lower-cased, nothing else is converted.** `HR.EMPLOYEES` is created as `employees` in the schema you chose, with columns like `emp_id`, so you can write `SELECT emp_id FROM hr.employees` with no quoting. The table still matches the source table one-for-one; only the spelling changes. A table copied by an older version of O2P keeps its upper-case name and is still loaded in place — it is not duplicated under a new lower-case name. Two source tables whose names differ only in case cannot both be copied, and the run says so when you start it.
 
 ---
 

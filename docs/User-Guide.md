@@ -501,13 +501,36 @@ Review generated types before production. Unknown or provider-specific values fa
 
 At job launch:
 
-- target schema defaults to `public`;
-- target table name is always the source table name;
-- identifiers are quoted and case-preserved;
+- target schema defaults to `public`, and is used exactly as you pick it;
+- target table and column names are the source names **in lower case**;
 - no `_mgN` suffix is allocated;
 - a missing table is created with table selection columns;
 - an existing table is **not altered** to match the table selection — no `CREATE`, no `ALTER` is issued for it;
 - an existing table is checked for compatibility, then truncated before load.
+
+### Lower-case names
+
+Oracle reports names in upper case, and O2P quotes every identifier it writes. A quoted upper-case name
+*stays* upper case in PostgreSQL, so tables copied by older versions have to be quoted in every query. Names
+O2P creates are now lower-cased, which is what lets them be typed plainly:
+
+```sql
+SELECT "LAST_UPDATED" FROM "HR"."EMPLOYEES";   -- a table created by an older version
+SELECT last_updated FROM hr.employees;          -- a table created now
+```
+
+This covers every name O2P creates — tables, columns, and the key and index names it would generate. It does
+**not** touch the destination schema, which you pick from the schemas that already exist, and it does not
+touch constraint names it puts back after a load, which belong to the destination.
+
+**Tables copied by an earlier version keep working and are not duplicated.** When a table is prepared, O2P
+looks for the lower-case name first and then for the source spelling. If only the older upper-case table is
+there, that one is loaded, under its own spelling, exactly as before — no second table is built beside it and
+nothing is re-copied. Only tables created from now on are lower case. To move an older table over, rename it
+yourself; O2P will not rename a table it did not just create.
+
+**Two tables whose names differ only in case cannot both be copied**, because both would become one
+lower-case name. The run is refused when you start it, naming the pair; untick one of them.
 
 **Compatibility check on an existing table.** Before anything is dropped or truncated, O2P reads the
 target's real columns from `pg_attribute` and compares them to the table selection. If they cannot accept the
@@ -517,8 +540,9 @@ and use **Retry failed**.
 
 A table is blocked when:
 
-- a table selection column is missing from the target (names are case-sensitive — Oracle yields `EMP_ID`,
-  a hand-built table often has `emp_id`; the message names the real spelling);
+- a table selection column is missing from the target. Ordinary upper/lower case is handled for you — a
+  table O2P creates gets `emp_id`, one from an older version keeps `EMP_ID`, and each is matched under its
+  own spelling. What is left is a genuinely different name, and the message names the real spelling;
 - the type family differs (text vs numeric vs timestamp vs bytea);
 - a fixed-width type differs at all, **widening included** — `integer` into `bigint` fails, because
   binary `COPY` carries no type OIDs and the bytes are written from the table selection type;

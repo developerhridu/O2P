@@ -40,14 +40,5 @@ namespace O2P.Application.Schema
         {
             return $"{QuoteOracle(owner)}.{QuoteOracle(table)}";
         }
-
-        public static IReadOnlyList<string> IncludedColumnNames(O2P.Domain.Entities.ManifestTable table)
-        {
-            return table.Columns
-                .Where(c => !c.IsExcluded)
-                .OrderBy(c => c.Id)
-                .Select(c => c.ColumnName)
-                .ToList();
-        }
     }
 }

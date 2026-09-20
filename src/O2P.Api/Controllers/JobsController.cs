@@ -6,6 +6,7 @@ using O2P.Infrastructure.Metadata;
 using O2P.Domain.Entities;
 using O2P.Application.Core;
 using O2P.Application.Interfaces;
+using O2P.Application.Schema;
 using System;
 using System.Linq;
 using System.Threading.Tasks;
@@ -90,6 +91,19 @@ namespace O2P.Api.Controllers
                 return BadRequest("This table selection has no tables ticked, so there is nothing to copy. Open it, tick at least one table, save it, and start the run again.");
             }
 
+            // Destination names are lower case, so two ticked tables whose names differ only in case
+            // would land on the same one. Unchecked that surfaces as a unique-index violation on
+            // table_runs with no hint what caused it, so refuse now and name the pair.
+            var tableCollisions = PostgresName.FindCollisions(
+                manifest.Tables.Where(t => t.Included).Select(t => t.TableName));
+            if (tableCollisions.Count > 0)
+            {
+                return BadRequest(
+                    "This table selection has tables whose names differ only in upper and lower case, and destination " +
+                    $"table names are lower case: {PostgresName.DescribeCollisions(tableCollisions)}. " +
+                    "Untick one of each pair, then start the run again.");
+            }
+
             // Create JobRun
             var job = new JobRun
             {
@@ -105,7 +119,10 @@ namespace O2P.Api.Controllers
             _db.JobRuns.Add(job);
             await _db.SaveChangesAsync();
 
-            // Populate TableRuns and always use the source table name (load into existing same-named target).
+            // Populate TableRuns. The destination name is the source name in lower case, so the table
+            // can be queried without quoting. If an earlier run already made this table under Oracle's
+            // upper-case spelling, preparing it finds that one and loads into it instead, rather than
+            // building a second copy beside it.
             foreach (var table in manifest.Tables.Where(t => t.Included))
             {
                 var tableRun = new TableRun
@@ -113,7 +130,7 @@ namespace O2P.Api.Controllers
                     JobRunId = job.Id,
                     ManifestTableId = table.Id,
                     Status = "Pending",
-                    TargetTableName = table.TableName
+                    TargetTableName = PostgresName.For(table.TableName)
                 };
                 _db.TableRuns.Add(tableRun);
                 await _db.SaveChangesAsync();

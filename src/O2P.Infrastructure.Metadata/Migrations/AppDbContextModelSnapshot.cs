@@ -973,6 +973,9 @@ namespace O2P.Infrastructure.Metadata.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<string>("TargetNameStyle")
+                        .HasColumnType("text");
+
                     b.Property<string>("TargetTableName")
                         .IsRequired()
                         .HasColumnType("text");

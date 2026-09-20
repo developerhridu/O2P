@@ -3,6 +3,7 @@ using O2P.Application.Interfaces;
 using O2P.Application.Schema;
 using O2P.Domain.Entities;
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -40,7 +41,10 @@ namespace O2P.Application.Core
         /// </summary>
         public async Task<string> AllocateTargetNameAsync(long tableRunId, long targetConnectionId, string targetSchema, string baseName, CancellationToken cancellationToken = default)
         {
-            var normalizedBase = baseName.Trim();
+            // The allocation reserves the name O2P would create, and O2P creates in lower case. A run
+            // that ends up reusing an older upper-case table still holds this row; it only has to be
+            // stable and unique per (connection, schema, name), which the lower-cased form is.
+            var normalizedBase = PostgresName.For(baseName.Trim());
 
             await using var tx = await _db.Database.BeginTransactionAsync(cancellationToken);
 
@@ -159,7 +163,26 @@ namespace O2P.Application.Core
             await _db.SaveChangesAsync(cancellationToken);
 
             var targetSchema = tableRun.JobRun.TargetSchema;
-            var targetTableName = tableRun.TargetTableName;
+
+            // Two source columns that differ only in case would collide once lower-cased, and COPY
+            // would report it mid-load as "column specified more than once" with no hint where it came
+            // from. Refuse here, before the table is touched, naming both.
+            var columnCollisions = PostgresName.FindCollisions(
+                tableRun.ManifestTable.Columns.Where(c => !c.IsExcluded).Select(c => c.ColumnName));
+            if (columnCollisions.Count > 0)
+            {
+                throw new InvalidOperationException(
+                    $"Table {tableRun.ManifestTable.TableName} has columns whose names differ only in upper and lower case, " +
+                    $"and destination names are lower case: {PostgresName.DescribeCollisions(columnCollisions)}. " +
+                    "Leave one of each pair out of the table selection.");
+            }
+
+            // Which name to look for, and what to call the columns. O2P now creates tables in lower
+            // case, but tables created by earlier runs are still out there under Oracle's upper-case
+            // spelling, so both are checked and whichever is found decides the spelling for this run.
+            var lowerTableName = PostgresName.For(tableRun.ManifestTable.TableName);
+            var targetTableName = lowerTableName;
+            var style = PostgresName.LowerStyle;
             PostgresConstraintSnapshot? snapshot = null;
             var constraintsSuspended = false;
 
@@ -167,14 +190,37 @@ namespace O2P.Application.Core
             {
                 var tableExisted = await _constraintManager.TableExistsAsync(
                     targetConn!, postgresPassword, targetSchema, targetTableName, cancellationToken);
+
+                if (!tableExisted)
+                {
+                    // Nothing in lower case. Before creating one, look for the name an earlier run
+                    // would have used - otherwise that table is left holding a stale full copy while
+                    // a second one is built beside it.
+                    var sourceCasedName = tableRun.ManifestTable.TableName;
+                    if (!string.Equals(sourceCasedName, lowerTableName, StringComparison.Ordinal)
+                        && await _constraintManager.TableExistsAsync(
+                            targetConn!, postgresPassword, targetSchema, sourceCasedName, cancellationToken))
+                    {
+                        targetTableName = sourceCasedName;
+                        style = PostgresName.SourceStyle;
+                        tableExisted = true;
+                    }
+                }
+
                 tableRun.TargetTablePreExisted = tableExisted;
+
+                // Record what was resolved before anything is touched, so a failure leaves behind the
+                // name that was actually acted on. The Worker reads both back for every batch, which
+                // is what keeps all the batches of one run writing the same column names.
+                tableRun.TargetTableName = targetTableName;
+                tableRun.TargetNameStyle = style;
 
                 if (!tableExisted)
                 {
                     // Absent: create the equivalent schema and load into it. A table created a moment
                     // ago has no constraints to preserve and no rows to clear, so the snapshot, drop
                     // and truncate below would every one of them be no-ops.
-                    var createTableDdl = PostgresDdlGenerator.GenerateTableDdl(tableRun.ManifestTable, targetSchema, targetTableName);
+                    var createTableDdl = PostgresDdlGenerator.GenerateTableDdl(tableRun.ManifestTable, targetSchema, targetTableName, style);
                     await _ddlExecutor.ExecuteDdlAsync(targetConn!, postgresPassword, createTableDdl, cancellationToken);
                 }
                 else
@@ -186,7 +232,13 @@ namespace O2P.Application.Core
 
                     if (liveColumns != null)
                     {
-                        var problems = TargetSchemaComparer.Compare(tableRun.ManifestTable, liveColumns);
+                        // A table can be lower case outside and upper case inside - hand-built, or
+                        // renamed by someone. Take whichever spelling its columns actually use, so
+                        // that case is reported as a plain mismatch rather than failing mid-copy.
+                        style = ChooseColumnStyle(tableRun.ManifestTable, liveColumns, style);
+                        tableRun.TargetNameStyle = style;
+
+                        var problems = TargetSchemaComparer.Compare(tableRun.ManifestTable, liveColumns, style);
                         if (TargetSchemaComparer.HasBlockingProblem(problems))
                         {
                             throw new TargetSchemaMismatchException(targetSchema, targetTableName, problems);
@@ -260,6 +312,30 @@ namespace O2P.Application.Core
 
                 throw;
             }
+        }
+
+        /// <summary>
+        /// Picks the spelling an existing table's columns actually use, by counting how many of the
+        /// loaded columns each candidate finds. The table name is only a hint: a table can be lower
+        /// case outside and upper case inside, or the other way about. Ties keep <paramref name="preferred"/>,
+        /// which is the style the table name suggested, so a table with no matching columns at all is
+        /// still reported against the expected spelling rather than an arbitrary one.
+        /// </summary>
+        private static string ChooseColumnStyle(
+            ManifestTable manifest,
+            IReadOnlyList<PostgresLiveColumn> liveColumns,
+            string preferred)
+        {
+            var live = new HashSet<string>(liveColumns.Select(c => c.ColumnName), StringComparer.Ordinal);
+            var loaded = manifest.Columns.Where(c => !c.IsExcluded).ToList();
+            if (loaded.Count == 0) return preferred;
+
+            var lowerHits = loaded.Count(c => live.Contains(PostgresName.For(c.ColumnName)));
+            var sourceHits = loaded.Count(c => live.Contains(c.ColumnName));
+
+            if (lowerHits > sourceHits) return PostgresName.LowerStyle;
+            if (sourceHits > lowerHits) return PostgresName.SourceStyle;
+            return preferred;
         }
 
         /// <summary>

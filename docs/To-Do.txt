@@ -4,3 +4,5 @@
    MigrationEngine.StartTableRunAsync - so an "append" mode would be a small change
    there plus a job-level option. See docs/User-Guide.md "Target schema and table
    behavior".
+2. Plan: Change track. new row + old rows updated.\
+3. Change Track feature

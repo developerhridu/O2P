@@ -284,4 +284,87 @@ public class TargetSchemaComparerTests
     [InlineData("public.email_address")]
     [InlineData("mood_enum")]
     public void BlocksTypesItCannotReasonAbout(string targetType) => AssertBlocked("text", targetType);
+
+    // ---- name style --------------------------------------------------------
+    //
+    // O2P now creates destination tables in lower case, while tables left by earlier runs still carry
+    // Oracle's upper-case spelling. Which one a run uses is decided when the table is prepared and
+    // passed in here; the comparer itself never guesses.
+
+    [Fact]
+    public void LowerStyleMatchesAnUppercaseSourceOntoLowercaseColumns()
+    {
+        var problems = TargetSchemaComparer.Compare(
+            Manifest(Column("EMP_ID", "integer"), Column("FIRST_NAME", "text")),
+            new[] { Live("emp_id", "integer"), Live("first_name", "text") },
+            PostgresName.LowerStyle);
+
+        Assert.Empty(problems);
+    }
+
+    [Fact]
+    public void SourceStyleMatchesATableAnEarlierRunCreated()
+    {
+        var problems = TargetSchemaComparer.Compare(
+            Manifest(Column("EMP_ID", "integer")),
+            new[] { Live("EMP_ID", "integer") },
+            PostgresName.SourceStyle);
+
+        Assert.Empty(problems);
+    }
+
+    [Fact]
+    public void LowerStyleStillBlocksATypeClash()
+    {
+        // Folding the case must not soften anything else: binary COPY carries no type OIDs, so a
+        // widened destination column is as broken as a narrowed one whatever the name looks like.
+        var problems = TargetSchemaComparer.Compare(
+            Manifest(Column("EMP_ID", "integer")),
+            new[] { Live("emp_id", "bigint") },
+            PostgresName.LowerStyle);
+
+        Assert.True(TargetSchemaComparer.HasBlockingProblem(problems));
+    }
+
+    [Fact]
+    public void LowerStyleAgainstAnUppercaseTableReportsTheNameItLookedFor()
+    {
+        // The wrong style is a plain mismatch reported before anything is touched, not a mid-copy
+        // failure - and the message has to name both spellings to be actionable.
+        var problems = TargetSchemaComparer.Compare(
+            Manifest(Column("EMP_ID", "integer")),
+            new[] { Live("EMP_ID", "integer") },
+            PostgresName.LowerStyle);
+
+        var problem = Assert.Single(problems, p => p.Severity == MismatchSeverity.Fail);
+        Assert.Contains("\"emp_id\"", problem.Message);
+        Assert.Contains("(from \"EMP_ID\")", problem.Message);
+        Assert.Contains("the destination has \"EMP_ID\"", problem.Message);
+    }
+
+    [Fact]
+    public void ANearMissIsNotAlsoReportedAsAnExtraColumn()
+    {
+        // The upper-case column is claimed by the missing lower-case one, so it must not come back a
+        // second time as "extra required column in the destination".
+        var problems = TargetSchemaComparer.Compare(
+            Manifest(Column("EMP_ID", "integer", nullable: false)),
+            new[] { Live("EMP_ID", "integer", notNull: true) },
+            PostgresName.LowerStyle);
+
+        Assert.Single(problems);
+    }
+
+    [Fact]
+    public void DefaultingToSourceStyleKeepsTheOldBehaviour()
+    {
+        // The two-argument overload is what every existing caller used before the style existed.
+        Assert.Empty(TargetSchemaComparer.Compare(
+            Manifest(Column("EMP_ID", "integer")),
+            new[] { Live("EMP_ID", "integer") }));
+
+        Assert.True(TargetSchemaComparer.HasBlockingProblem(TargetSchemaComparer.Compare(
+            Manifest(Column("EMP_ID", "integer")),
+            new[] { Live("emp_id", "integer") })));
+    }
 }
