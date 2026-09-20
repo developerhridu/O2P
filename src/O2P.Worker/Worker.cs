@@ -348,7 +348,7 @@ RETURNING c.""Id"";";
                     .ExecuteUpdateAsync(s => s
                         .SetProperty(c => c.Status, "Failed")
                         .SetProperty(c => c.ErrorMessage,
-                            $"Chunk timed out after {chunkTimeoutMinutes} minutes with no completion (stall watchdog). Use Retry failed to re-queue.")
+                            $"Chunk timed out after {chunkTimeoutMinutes} minutes with no completion and was stopped. Use Retry failed to try it again.")
                         .SetProperty(c => c.LeaseExpiresAt, (DateTimeOffset?)null)
                         .SetProperty(c => c.CompletedAt, DateTimeOffset.UtcNow), CancellationToken.None);
             }
@@ -450,7 +450,7 @@ RETURNING c.""Id"";";
                         .Where(t => t.Id == tableRunId && t.Status == "Loading")
                         .ExecuteUpdateAsync(s => s
                             .SetProperty(t => t.Status, "Failed")
-                            .SetProperty(t => t.ErrorMessage, "One or more chunks failed. Use retry_failed to reprocess.")
+                            .SetProperty(t => t.ErrorMessage, "Some batches failed. Use Retry failed to copy them again.")
                             .SetProperty(t => t.CompletedAt, DateTimeOffset.UtcNow), cancellationToken);
 
                     // Always restore constraints on load failure (even if another caller claimed Failed).
@@ -463,7 +463,7 @@ RETURNING c.""Id"";";
                             .Where(t => t.Id == tableRunId)
                             .ExecuteUpdateAsync(s => s.SetProperty(
                                 t => t.ErrorMessage,
-                                "One or more chunks failed; constraint restore also failed: " + restoreError),
+                                "Some batches failed, and the table constraints could not be put back: " + restoreError),
                                 cancellationToken);
                     }
 
@@ -496,7 +496,7 @@ RETURNING c.""Id"";";
                     if (restoreError != null)
                     {
                         tableRun.Status = "Failed";
-                        tableRun.ErrorMessage = $"Constraint restore failed after load: {restoreError}";
+                        tableRun.ErrorMessage = $"The data copied, but the table constraints could not be put back: {restoreError}";
                         tableRun.CompletedAt = DateTimeOffset.UtcNow;
                         await db.SaveChangesAsync(cancellationToken);
                         await CheckAndCompleteJobAsync(db, jobRunId, cancellationToken);
@@ -525,7 +525,7 @@ RETURNING c.""Id"";";
                 {
                     _logger.LogError(ex, "Validation failed for table run {TableRunId}.", tableRunId);
                     tableRun.Status = "CompletedWithErrors";
-                    tableRun.ErrorMessage = $"Validation error: {ex.Message}";
+                    tableRun.ErrorMessage = $"The row count check could not run: {ex.Message}";
                     tableRun.CompletedAt = DateTimeOffset.UtcNow;
                     await db.SaveChangesAsync(cancellationToken);
                 }
@@ -566,7 +566,7 @@ RETURNING c.""Id"";";
                 var targetConn = await db.Connections.FindAsync(new object[] { targetConnId }, cancellationToken);
                 if (targetConn == null)
                 {
-                    return "Target connection not found for constraint restore.";
+                    return "Could not find the destination database to put the table constraints back.";
                 }
 
                 var secretProtector = services.GetRequiredService<ISecretProtector>();
@@ -693,7 +693,7 @@ RETURNING c.""Id"";";
                                                 (c.Status == "Pending" || c.Status == "Running"))
                                     .ExecuteUpdateAsync(s => s
                                         .SetProperty(c => c.Status, "Cancelled")
-                                        .SetProperty(c => c.ErrorMessage, "Cancelled by user.")
+                                        .SetProperty(c => c.ErrorMessage, "Cancelled.")
                                         .SetProperty(c => c.LeaseExpiresAt, (DateTimeOffset?)null)
                                         .SetProperty(c => c.CompletedAt, DateTimeOffset.UtcNow), cancellationToken);
 
@@ -714,8 +714,8 @@ RETURNING c.""Id"";";
                                             .SetProperty(t => t.CompletedAt, DateTimeOffset.UtcNow)
                                             .SetProperty(t => t.ErrorMessage,
                                                 restoreError == null
-                                                    ? "Cancelled; constraints restored."
-                                                    : "Cancelled; constraint restore failed: " + restoreError),
+                                                    ? "Cancelled. The table constraints were put back."
+                                                    : "Cancelled, but the table constraints could not be put back: " + restoreError),
                                             cancellationToken);
                                 }
                             }
@@ -861,13 +861,19 @@ RETURNING c.""Id"";";
                         scope.ServiceProvider, db, tableRunId, cancellationToken, truncateBeforeRestore: true);
                     if (restoreError != null && table != null)
                     {
-                        table.ErrorMessage = $"{ex.Message} | Constraint restore failed: {restoreError}";
+                        table.ErrorMessage = $"{ex.Message} | The table constraints could not be put back: {restoreError}";
                         await db.SaveChangesAsync(cancellationToken);
                     }
 
                     _logger.LogError(ex, "Failed to prepare table run {TableRunId}", tableRunId);
                 }
             }
+
+            // A table that fails during prepare never gets a chunk, and chunk completion is the only
+            // other thing that settles a job. Without this, a job whose tables all fail preparation
+            // (a systematically mismatched target schema, say) would sit in Running forever. No-op
+            // unless every table has reached a terminal state.
+            await CheckAndCompleteJobAsync(db, job.Id, cancellationToken);
         }
 
         private async Task RecoverExpiredLeasesAsync(CancellationToken cancellationToken)

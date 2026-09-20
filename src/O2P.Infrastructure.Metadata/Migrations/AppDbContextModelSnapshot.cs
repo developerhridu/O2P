@@ -965,6 +965,9 @@ namespace O2P.Infrastructure.Metadata.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<bool?>("TargetTablePreExisted")
+                        .HasColumnType("boolean");
+
                     b.HasKey("Id");
 
                     b.HasIndex("ManifestTableId");

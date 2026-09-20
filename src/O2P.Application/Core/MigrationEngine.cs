@@ -11,21 +11,27 @@ namespace O2P.Application.Core
 {
     public class MigrationEngine
     {
+        /// <summary>Resume fence written by PostgresBinaryWriter; one per target schema.</summary>
+        private const string ChunkLogTableName = "_o2p_chunk_log";
+
         private readonly IAppDbContext _db;
         private readonly IOracleChunkPlanner _chunkPlanner;
         private readonly IPostgresDdlExecutor _ddlExecutor;
         private readonly IPostgresConstraintManager _constraintManager;
+        private readonly IPostgresSchemaInspector _schemaInspector;
 
         public MigrationEngine(
             IAppDbContext db,
             IOracleChunkPlanner chunkPlanner,
             IPostgresDdlExecutor ddlExecutor,
-            IPostgresConstraintManager constraintManager)
+            IPostgresConstraintManager constraintManager,
+            IPostgresSchemaInspector schemaInspector)
         {
             _db = db;
             _chunkPlanner = chunkPlanner;
             _ddlExecutor = ddlExecutor;
             _constraintManager = constraintManager;
+            _schemaInspector = schemaInspector;
         }
 
         /// <summary>
@@ -117,7 +123,7 @@ namespace O2P.Application.Core
                     return normalizedBase;
                 }
 
-                throw new InvalidOperationException($"Could not allocate target name for {baseName}.");
+                throw new InvalidOperationException($"Could not reserve a destination table name for {baseName}.");
             }
         }
 
@@ -133,17 +139,22 @@ namespace O2P.Application.Core
                 .ThenInclude(a => a.Connections)
                 .FirstOrDefaultAsync(t => t.Id == tableRunId, cancellationToken);
 
-            if (tableRun == null) throw new Exception("TableRun not found.");
+            if (tableRun == null) throw new Exception("This table is no longer part of the run.");
 
             var sourceBinding = tableRun.JobRun.Application.Connections.FirstOrDefault(c => c.Slot == tableRun.JobRun.SourceSlot);
             var targetBinding = tableRun.JobRun.Application.Connections.FirstOrDefault(c => c.Slot == tableRun.JobRun.TargetSlot);
 
-            if (sourceBinding == null || targetBinding == null) throw new Exception("Connections not bound.");
+            if (sourceBinding == null || targetBinding == null) throw new Exception("The source or destination database has not been chosen for this migration.");
 
             var sourceConn = await _db.Connections.FindAsync(new object[] { sourceBinding.ConnectionId }, cancellationToken);
             var targetConn = await _db.Connections.FindAsync(new object[] { targetBinding.ConnectionId }, cancellationToken);
 
             tableRun.Status = "Creating";
+            // Drop any snapshot left over from an earlier attempt at this same TableRun. Without
+            // this, a retry that stops at the compatibility check below would leave a stale snapshot
+            // for the Worker's safety net, which truncates before restoring - wiping the very table
+            // we are refusing to touch.
+            tableRun.ConstraintSnapshotJson = null;
             tableRun.StartedAt ??= DateTimeOffset.UtcNow;
             await _db.SaveChangesAsync(cancellationToken);
 
@@ -156,24 +167,46 @@ namespace O2P.Application.Core
             {
                 var tableExisted = await _constraintManager.TableExistsAsync(
                     targetConn!, postgresPassword, targetSchema, targetTableName, cancellationToken);
+                tableRun.TargetTablePreExisted = tableExisted;
 
-                var createTableDdl = PostgresDdlGenerator.GenerateTableDdl(tableRun.ManifestTable, targetSchema, targetTableName);
-                await _ddlExecutor.ExecuteDdlAsync(targetConn!, postgresPassword, createTableDdl, cancellationToken);
-
-                snapshot = await _constraintManager.SnapshotAsync(
-                    targetConn!, postgresPassword, targetSchema, targetTableName, cancellationToken);
-                tableRun.ConstraintSnapshotJson = PostgresConstraintSnapshot.Serialize(snapshot);
-                await _db.SaveChangesAsync(cancellationToken);
-
-                // Mark suspended before Drop so any mid-drop failure still triggers restore.
-                constraintsSuspended = snapshot.Constraints.Count > 0;
-                await _constraintManager.DropAsync(targetConn!, postgresPassword, snapshot, cancellationToken);
-
-                if (tableExisted)
+                if (!tableExisted)
                 {
+                    // Absent: create the equivalent schema and load into it. A table created a moment
+                    // ago has no constraints to preserve and no rows to clear, so the snapshot, drop
+                    // and truncate below would every one of them be no-ops.
+                    var createTableDdl = PostgresDdlGenerator.GenerateTableDdl(tableRun.ManifestTable, targetSchema, targetTableName);
+                    await _ddlExecutor.ExecuteDdlAsync(targetConn!, postgresPassword, createTableDdl, cancellationToken);
+                }
+                else
+                {
+                    // Present: leave the schema exactly as it is - no CREATE, no ALTER. Prove it can
+                    // accept the manifest BEFORE anything destructive, so a mismatch costs no data.
+                    var liveColumns = await _schemaInspector.GetTableColumnsAsync(
+                        targetConn!, postgresPassword, targetSchema, targetTableName, cancellationToken);
+
+                    if (liveColumns != null)
+                    {
+                        var problems = TargetSchemaComparer.Compare(tableRun.ManifestTable, liveColumns);
+                        if (TargetSchemaComparer.HasBlockingProblem(problems))
+                        {
+                            throw new TargetSchemaMismatchException(targetSchema, targetTableName, problems);
+                        }
+                    }
+
+                    snapshot = await _constraintManager.SnapshotAsync(
+                        targetConn!, postgresPassword, targetSchema, targetTableName, cancellationToken);
+                    tableRun.ConstraintSnapshotJson = PostgresConstraintSnapshot.Serialize(snapshot);
+                    await _db.SaveChangesAsync(cancellationToken);
+
+                    // Mark suspended before Drop so any mid-drop failure still triggers restore.
+                    constraintsSuspended = snapshot.Constraints.Count > 0;
+                    await _constraintManager.DropAsync(targetConn!, postgresPassword, snapshot, cancellationToken);
+
                     await _constraintManager.TruncateAsync(
                         targetConn!, postgresPassword, targetSchema, targetTableName, cancellationToken);
                 }
+
+                await EnsureChunkLogTableAsync(targetConn!, postgresPassword, targetSchema, cancellationToken);
 
                 var allocation = await _db.TargetNameAllocations.FirstOrDefaultAsync(a => a.TableRunId == tableRun.Id, cancellationToken);
                 if (allocation != null)
@@ -220,12 +253,49 @@ namespace O2P.Application.Core
                     catch (Exception restoreEx)
                     {
                         throw new InvalidOperationException(
-                            $"Table prepare failed and constraint restore also failed. Original: {ex.Message}. Restore: {restoreEx.Message}",
+                            $"Preparing the table failed, and its constraints could not be put back. Original problem: {ex.Message}. Restore problem: {restoreEx.Message}",
                             ex);
                     }
                 }
 
                 throw;
+            }
+        }
+
+        /// <summary>
+        /// Creates the per-schema chunk fence table up front, while nothing else is running for this
+        /// table. The writer opens every chunk with its own CREATE TABLE IF NOT EXISTS for this same
+        /// table, but that is not race-safe in Postgres: concurrent chunks can both pass the
+        /// existence check, and the losers die on pg_type's unique index
+        /// ("duplicate key value violates unique constraint \"pg_type_typname_nsp_index\"").
+        /// Creating it once here means the writer's copy always finds it already present.
+        /// </summary>
+        private async Task EnsureChunkLogTableAsync(
+            Connection targetConnection,
+            string postgresPassword,
+            string targetSchema,
+            CancellationToken cancellationToken)
+        {
+            var ddl = $@"
+CREATE TABLE IF NOT EXISTS {SqlIdentifier.QuotePostgresQualified(targetSchema, ChunkLogTableName)} (
+    job_run_id bigint NOT NULL,
+    table_run_id bigint NOT NULL,
+    chunk_index integer NOT NULL,
+    completed_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (job_run_id, table_run_id, chunk_index)
+);";
+
+            try
+            {
+                await _ddlExecutor.ExecuteDdlAsync(targetConnection, postgresPassword, ddl, cancellationToken);
+            }
+            catch (Exception)
+            {
+                // Another worker preparing a different job against this schema may have won the same
+                // race. If the table is there now, that is exactly the outcome we wanted.
+                var exists = await _constraintManager.TableExistsAsync(
+                    targetConnection, postgresPassword, targetSchema, ChunkLogTableName, cancellationToken);
+                if (!exists) throw;
             }
         }
     }

@@ -39,17 +39,17 @@ export default function Applications() {
         setDescription('');
         fetchApps();
       } else {
-        console.error('Failed to create application');
+        console.error('Could not create the migration');
       }
     } catch (error) {
-      console.error('Error creating application:', error);
+      console.error('Error creating the migration:', error);
     } finally {
       setIsSubmitting(false);
     }
   };
 
   const handleDelete = async (id: number, appName: string) => {
-    if (!confirm(`Are you sure you want to delete application "${appName}"? This will delete all associated manifests, configurations, and job history.`)) {
+    if (!confirm(`Delete the migration "${appName}"? This also deletes its table selections, settings and run history.`)) {
       return;
     }
 
@@ -62,23 +62,23 @@ export default function Applications() {
       if (response.ok) {
         fetchApps();
       } else {
-        console.error('Failed to delete application');
+        console.error('Could not delete the migration');
       }
     } catch (error) {
-      console.error('Error deleting application:', error);
+      console.error('Error deleting the migration:', error);
     }
   };
 
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
-        <h1 className="text-3xl font-bold tracking-tight">Applications</h1>
+        <h1 className="text-3xl font-bold tracking-tight">Migrations</h1>
         <button 
           onClick={() => setIsModalOpen(true)}
           className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors font-medium shadow-lg shadow-blue-900/20 cursor-pointer"
         >
           <Plus size={20} />
-          New Application
+          New Migration
         </button>
       </div>
 
@@ -92,7 +92,7 @@ export default function Applications() {
                   <button 
                     onClick={() => handleDelete(app.id, app.name)}
                     className="text-slate-500 hover:text-rose-400 p-1 rounded hover:bg-slate-900 transition-colors cursor-pointer"
-                    title="Delete Application"
+                    title="Delete migration"
                   >
                     <Trash2 size={18} />
                   </button>
@@ -113,12 +113,12 @@ export default function Applications() {
         ))}
         {apps.length === 0 && (
           <div className="col-span-full py-12 text-center text-slate-500 bg-slate-900/50 rounded-xl border border-slate-800 border-dashed">
-            No applications configured yet.
+            No migrations set up yet.
           </div>
         )}
       </div>
 
-      {/* New Application Modal */}
+      {/* New migration modal */}
       {isModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-md p-6 shadow-2xl relative">
@@ -128,10 +128,10 @@ export default function Applications() {
             >
               <X size={20} />
             </button>
-            <h2 className="text-xl font-semibold mb-6">Create New Application</h2>
+            <h2 className="text-xl font-semibold mb-6">New migration</h2>
             <form onSubmit={handleCreate} className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-slate-300 mb-2">Application Name</label>
+                <label className="block text-sm font-medium text-slate-300 mb-2">Migration name</label>
                 <input 
                   type="text" 
                   required
@@ -147,7 +147,7 @@ export default function Applications() {
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
                   className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-2.5 text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 transition-all text-sm h-24 resize-none"
-                  placeholder="Provide a brief description of the migration scope..."
+                  placeholder="What is being moved, and why"
                 />
               </div>
               <div className="flex space-x-3 pt-4">

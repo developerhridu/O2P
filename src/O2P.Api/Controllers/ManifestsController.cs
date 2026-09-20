@@ -79,7 +79,7 @@ namespace O2P.Api.Controllers
                 .Where(c => c.ConnectionId == connectionId && c.Owner == owner.ToUpper())
                 .ToListAsync();
 
-            if (!cached.Any()) return BadRequest("No discovery cache found for connection and owner.");
+            if (!cached.Any()) return BadRequest("No tables have been scanned for that database and schema yet.");
 
             var manifest = new Manifest
             {

@@ -24,6 +24,12 @@ namespace O2P.Domain.Entities
         /// </summary>
         public string? ConstraintSnapshotJson { get; set; }
 
+        /// <summary>
+        /// True when the target table already existed and was reused, false when O2P created it.
+        /// Null for runs recorded before this was tracked.
+        /// </summary>
+        public bool? TargetTablePreExisted { get; set; }
+
         public DateTimeOffset? StartedAt { get; set; }
         public DateTimeOffset? CompletedAt { get; set; }
 

@@ -79,7 +79,7 @@ namespace O2P.Api.Controllers
 
             if (app == null || manifest == null)
             {
-                return BadRequest("Invalid Application or Manifest selection.");
+                return BadRequest("That migration or table selection does not exist.");
             }
 
             // Create JobRun
@@ -113,7 +113,7 @@ namespace O2P.Api.Controllers
                 var targetBinding = app.Connections.FirstOrDefault(c => c.Slot == request.TargetSlot);
                 if (targetBinding == null)
                 {
-                    return BadRequest("Target slot connection is not bound.");
+                    return BadRequest("No destination database has been chosen for this migration.");
                 }
 
                 tableRun.TargetTableName = await _engine.AllocateTargetNameAsync(tableRun.Id, targetBinding.ConnectionId, request.TargetSchema, table.TableName);
@@ -139,7 +139,7 @@ namespace O2P.Api.Controllers
                 .FirstOrDefaultAsync(j => j.Id == id);
 
             if (job == null) return NotFound("Job not found.");
-            if (job.Status != "Draft") return BadRequest("Only Draft jobs can be launched.");
+            if (job.Status != "Draft") return BadRequest("This run has already been started.");
 
             // Resolve env connections
             var sourceBinding = job.Application.Connections.FirstOrDefault(c => c.Slot == job.SourceSlot);
@@ -147,7 +147,7 @@ namespace O2P.Api.Controllers
 
             if (sourceBinding == null || targetBinding == null)
             {
-                return BadRequest("Source or Target slot connections are not bound.");
+                return BadRequest("The source or destination database has not been chosen for this migration.");
             }
 
             var sourceConn = await _db.Connections.FindAsync(sourceBinding.ConnectionId);
@@ -158,23 +158,32 @@ namespace O2P.Api.Controllers
                 var expectedPhrase = $"MIGRATE {job.Application.Name} LIVE";
                 if (!string.Equals(request?.ConfirmationPhrase, expectedPhrase, StringComparison.Ordinal))
                 {
-                    return BadRequest(new { message = $"Live target requires confirmation phrase: {expectedPhrase}" });
+                    return BadRequest(new { message = $"Copying into a live database needs confirmation. Type: {expectedPhrase}" });
                 }
             }
 
             var sourcePassword = _secretProtector.Unprotect(sourceConn!.SecretCiphertext ?? System.Array.Empty<byte>());
             var targetPassword = _secretProtector.Unprotect(targetConn!.SecretCiphertext ?? System.Array.Empty<byte>());
 
-            // Run preflight checks
-            var preflightResult = await preflightValidator.RunPreflightChecksAsync(sourceConn, sourcePassword, targetConn, targetPassword, job.TargetSchema, default);
+            // Run preflight checks. The job's target tables decide whether CREATE rights are needed:
+            // tables that already exist are reused as-is, so USAGE + INSERT/TRUNCATE is enough.
+            var targetTableNames = job.TableRuns.Select(t => t.TargetTableName).ToList();
+            var preflightResult = await preflightValidator.RunPreflightChecksAsync(
+                sourceConn, sourcePassword, targetConn, targetPassword, job.TargetSchema, targetTableNames, default);
             if (!preflightResult.Passed)
             {
                 _logger.LogWarning("Preflight failed for job {JobId} schema {Schema}: {Details}", job.Id, job.TargetSchema, preflightResult.Details);
                 return BadRequest(new
                 {
-                    message = "Preflight check failed. Job launch aborted.",
-                    errors = preflightResult.Details
+                    message = "The readiness check failed, so the run was not started.",
+                    errors = preflightResult.Details,
+                    warnings = preflightResult.Warnings
                 });
+            }
+
+            foreach (var warning in preflightResult.Warnings)
+            {
+                _logger.LogInformation("Preflight warning for job {JobId}: {Warning}", job.Id, warning);
             }
 
             job.Status = "Queued";
@@ -216,7 +225,7 @@ namespace O2P.Api.Controllers
             var allowed = new[] { "pause", "resume", "cancel", "retry_failed", "update_throttle" };
             if (!allowed.Contains(request.Command))
             {
-                return BadRequest("Unsupported command.");
+                return BadRequest("That action is not recognised.");
             }
 
             _db.JobCommands.Add(new JobCommand
@@ -320,8 +329,9 @@ namespace O2P.Api.Controllers
             var job = await _db.JobRuns
                 .Include(j => j.Application)
                 .ThenInclude(a => a.Connections)
+                .Include(j => j.TableRuns)
                 .FirstOrDefaultAsync(j => j.Id == id);
-                
+
             if (job == null) return NotFound();
 
             var sourceConnId = job.Application.Connections.First(c => c.Slot == job.SourceSlot).ConnectionId;
@@ -333,7 +343,9 @@ namespace O2P.Api.Controllers
             var sourcePassword = _secretProtector.Unprotect(sourceConn!.SecretCiphertext ?? System.Array.Empty<byte>());
             var targetPassword = _secretProtector.Unprotect(targetConn!.SecretCiphertext ?? System.Array.Empty<byte>());
 
-            var result = await preflightValidator.RunPreflightChecksAsync(sourceConn, sourcePassword, targetConn, targetPassword, job.TargetSchema, default);
+            var targetTableNames = job.TableRuns.Select(t => t.TargetTableName).ToList();
+            var result = await preflightValidator.RunPreflightChecksAsync(
+                sourceConn, sourcePassword, targetConn, targetPassword, job.TargetSchema, targetTableNames, default);
 
             return Ok(result);
         }

@@ -105,10 +105,10 @@ export default function ManifestBuilder() {
           setTables((manifest.tables || []).map(toBuilderTable));
           if (manifest.tables?.[0]?.owner) setOwner(manifest.tables[0].owner);
         } else {
-          setManifestName(`Custom Manifest ${new Date().toISOString().slice(0, 10)}`);
+          setManifestName(`Table selection ${new Date().toISOString().slice(0, 10)}`);
         }
       } catch (err: any) {
-        setError(err.message || 'Failed to load manifest builder.');
+        setError(err.message || 'Could not load this table selection.');
       } finally {
         setLoading(false);
       }
@@ -140,7 +140,7 @@ export default function ManifestBuilder() {
 
   const handleRefreshDictionary = async () => {
     if (!connectionId || !owner.trim()) {
-      alert('Select an Oracle connection and enter a schema/owner first.');
+      alert('Choose a source database and type a schema name first.');
       return;
     }
     setRefreshing(true);
@@ -150,7 +150,7 @@ export default function ManifestBuilder() {
       const discovered = (result.tables || []).map(toBuilderTable);
       setTables((prev) => mergeTables(prev, discovered));
     } catch (err: any) {
-      setError(err.message || 'Failed to refresh discovery dictionary.');
+      setError(err.message || 'Could not scan the source database.');
     } finally {
       setRefreshing(false);
     }
@@ -158,7 +158,7 @@ export default function ManifestBuilder() {
 
   const handleAddCustomTables = async () => {
     if (!connectionId || !owner.trim()) {
-      alert('Select an Oracle connection and enter a schema/owner first.');
+      alert('Choose a source database and type a schema name first.');
       return;
     }
     const names = customTablesText
@@ -181,7 +181,7 @@ export default function ManifestBuilder() {
         setCustomTablesText('');
       }
     } catch (err: any) {
-      setError(err.message || 'Failed to add custom tables.');
+      setError(err.message || 'Could not add those tables.');
     } finally {
       setAddingCustom(false);
     }
@@ -189,7 +189,7 @@ export default function ManifestBuilder() {
 
   const handleSave = async () => {
     if (tables.length === 0) {
-      alert('Add at least one table before saving.');
+      alert('Select at least one table before saving.');
       return;
     }
     setSaving(true);
@@ -217,7 +217,7 @@ export default function ManifestBuilder() {
 
       if (isNew) {
         const created = await createManifest(appIdNum, {
-          name: manifestName.trim() || 'Custom Manifest',
+          name: manifestName.trim() || 'Table selection',
           version: 1,
         });
         await updateManifestTables(created.id, payload);
@@ -226,7 +226,7 @@ export default function ManifestBuilder() {
         await updateManifestTables(Number(manifestId), payload);
       }
     } catch (err: any) {
-      setError(err.message || 'Failed to save manifest.');
+      setError(err.message || 'Could not save the table selection.');
     } finally {
       setSaving(false);
     }
@@ -236,7 +236,7 @@ export default function ManifestBuilder() {
     return (
       <div className="card flex items-center justify-center gap-3 py-12 text-slate-300">
         <RefreshCw size={20} className="spin" />
-        Loading manifest builder...
+        Loading table selection...
       </div>
     );
   }
@@ -260,9 +260,9 @@ export default function ManifestBuilder() {
                 className="bg-transparent text-2xl font-bold tracking-tight border-b border-transparent hover:border-slate-700 focus:border-blue-500 focus:outline-none"
               />
             ) : (
-              <h1 className="text-2xl font-bold tracking-tight">{manifestName || 'Manifest Builder'}</h1>
+              <h1 className="text-2xl font-bold tracking-tight">{manifestName || 'Select tables'}</h1>
             )}
-            <p className="text-slate-400 text-sm mt-1">Select and configure tables to migrate</p>
+            <p className="text-slate-400 text-sm mt-1">Pick the tables to copy, and filter their rows if you need to</p>
           </div>
         </div>
         <div className="flex items-center gap-3">
@@ -272,7 +272,7 @@ export default function ManifestBuilder() {
             disabled={refreshing || !connectionId || !owner.trim()}
           >
             <RefreshCw size={16} className={refreshing ? 'animate-spin' : ''} />
-            Refresh Dictionary
+            Scan source database
           </button>
           <button
             className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors font-medium shadow-lg shadow-blue-900/20 disabled:opacity-50"
@@ -280,7 +280,7 @@ export default function ManifestBuilder() {
             disabled={saving || tables.length === 0}
           >
             <Save size={16} className={saving ? 'animate-spin' : ''} />
-            Save Manifest
+            Save selection
           </button>
         </div>
       </div>
@@ -308,7 +308,7 @@ export default function ManifestBuilder() {
             </select>
           </div>
           <div className="min-w-[160px]">
-            <label className="block text-xs font-medium text-slate-400 mb-1">Schema / Owner</label>
+            <label className="block text-xs font-medium text-slate-400 mb-1">Source schema</label>
             <input
               className="w-full bg-slate-900 border border-slate-700 rounded-lg py-2 px-3 text-sm focus:outline-none focus:border-blue-500"
               placeholder="HR"
@@ -363,12 +363,12 @@ export default function ManifestBuilder() {
             <thead className="bg-slate-900/80 text-slate-400 sticky top-0 z-10 shadow-sm border-b border-slate-800">
               <tr>
                 <th className="p-4 w-12 text-center"></th>
-                <th className="p-4 font-medium">Owner</th>
+                <th className="p-4 font-medium">Schema</th>
                 <th className="p-4 font-medium">Table Name</th>
-                <th className="p-4 font-medium text-right">Est. Rows</th>
+                <th className="p-4 font-medium text-right">Rows (approx.)</th>
                 <th className="p-4 font-medium text-right">Size (MB)</th>
-                <th className="p-4 font-medium text-center">LOBs</th>
-                <th className="p-4 font-medium w-48">Filter (WHERE)</th>
+                <th className="p-4 font-medium text-center">Large objects</th>
+                <th className="p-4 font-medium w-48">Row filter</th>
                 <th className="p-4 font-medium w-16"></th>
               </tr>
             </thead>
@@ -388,7 +388,7 @@ export default function ManifestBuilder() {
                     {row.tableName}
                     {row.columns.length === 0 && (
                       <span className="ml-2 px-2 py-0.5 bg-amber-500/10 text-amber-300 rounded text-[10px] font-bold tracking-wider">
-                        NO COLUMNS
+                        NO COLUMN INFO
                       </span>
                     )}
                   </td>
@@ -417,7 +417,7 @@ export default function ManifestBuilder() {
                     <button
                       className="text-slate-500 hover:text-rose-400 text-xs"
                       onClick={() => removeTable(row.key)}
-                      title="Remove from manifest"
+                      title="Remove from selection"
                     >
                       Remove
                     </button>
@@ -428,7 +428,7 @@ export default function ManifestBuilder() {
               {filteredTables.length === 0 && (
                 <tr>
                   <td colSpan={8} className="p-8 text-center text-slate-500">
-                    No tables yet. Use Refresh Dictionary for a full schema scan, or add specific tables above.
+                    No tables yet. Scan the source database to list everything in the schema, or add specific tables above.
                   </td>
                 </tr>
               )}
@@ -441,10 +441,10 @@ export default function ManifestBuilder() {
           </div>
           <div className="flex gap-4">
             <div>
-              Total Rows: <span className="text-slate-200">{totalRows.toLocaleString()}</span>
+              Total rows: <span className="text-slate-200">{totalRows.toLocaleString()}</span>
             </div>
             <div>
-              Total Size: <span className="text-slate-200">{(totalBytes / 1024 / 1024).toFixed(2)} MB</span>
+              Total size: <span className="text-slate-200">{(totalBytes / 1024 / 1024).toFixed(2)} MB</span>
             </div>
           </div>
         </div>

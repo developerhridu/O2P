@@ -37,7 +37,7 @@ namespace O2P.Api.Controllers
         [HttpGet]
         public async Task<IActionResult> GetCachedTables(long connectionId, [FromQuery] string owner)
         {
-            if (string.IsNullOrEmpty(owner)) return BadRequest("Owner is required");
+            if (string.IsNullOrEmpty(owner)) return BadRequest("A source schema name is required.");
 
             var cached = await _db.DiscoveryCaches
                 .Include(c => c.Columns)
@@ -51,11 +51,11 @@ namespace O2P.Api.Controllers
         [Authorize(Roles = "Admin,Operator")]
         public async Task<IActionResult> RefreshDiscovery(long connectionId, [FromQuery] string owner, [FromBody] RefreshDiscoveryRequest? request, CancellationToken cancellationToken)
         {
-            if (string.IsNullOrEmpty(owner)) return BadRequest("Owner is required");
+            if (string.IsNullOrEmpty(owner)) return BadRequest("A source schema name is required.");
 
             var conn = await _db.Connections.FindAsync(new object[] { connectionId }, cancellationToken);
             if (conn == null || conn.Kind != O2P.Domain.Enums.ConnectionKind.Oracle)
-                return BadRequest("Invalid connection");
+                return BadRequest("That database does not exist.");
 
             string password;
             try
@@ -76,7 +76,7 @@ namespace O2P.Api.Controllers
             }
             catch (System.Exception ex)
             {
-                return BadRequest($"Oracle discovery failed: {ex.Message}");
+                return BadRequest($"Could not scan the Oracle database: {ex.Message}");
             }
 
             var tablesList = tables.ToList();
@@ -111,12 +111,12 @@ namespace O2P.Api.Controllers
             }
             catch (Exception ex)
             {
-                return BadRequest($"Failed to save discovered tables: {ex.Message}");
+                return BadRequest($"Could not save the tables that were found: {ex.Message}");
             }
 
             return Ok(new
             {
-                message = $"Discovered {tablesList.Count} table(s).",
+                message = $"Found {tablesList.Count} table(s).",
                 tables = tablesList.Select(ToManifestReadyTable)
             });
         }

@@ -13,6 +13,7 @@ import {
   Play
 } from 'lucide-react';
 import { commandJob, fetchJob, fetchMetrics, fetchValidation, hasRole } from '../api';
+import { commandLabel, statusColor, statusLabel } from '../labels';
 
 export default function JobDetails() {
   const { id } = useParams();
@@ -79,16 +80,16 @@ export default function JobDetails() {
       await commandJob(jobId, command);
       setActionMsg(
         command === 'cancel'
-          ? 'Cancel requested — worker will stop this job shortly.'
+          ? 'Cancelling — the run will stop shortly.'
           : command === 'retry_failed'
-            ? 'Retry requested — failed/cancelled work will be re-queued.'
+            ? 'Retrying — failed and cancelled work has been queued again.'
             : command === 'pause'
-              ? 'Pause requested — no new chunks will be claimed.'
-              : 'Resume requested — job set back to Running.'
+              ? 'Pausing — no new batches will be started.'
+              : 'Resuming — the run is going again.'
       );
       await pollProgress();
     } catch (err: any) {
-      setActionMsg(err.message || `Failed to ${command}`);
+      setActionMsg(err.message || `Couldn't ${commandLabel(command)}.`);
     } finally {
       setActionBusy(null);
     }
@@ -101,10 +102,10 @@ export default function JobDetails() {
   if (fetchError || !job) {
     return (
       <div className="card" style={{ textAlign: 'center', padding: '48px', display: 'flex', flexDirection: 'column', gap: '16px', alignItems: 'center' }}>
-        <h3 style={{ color: '#ef4444', margin: 0 }}>Error Loading Job</h3>
-        <p style={{ color: 'var(--text-secondary)', margin: 0 }}>{fetchError || 'Job run not found.'}</p>
+        <h3 style={{ color: '#ef4444', margin: 0 }}>Could not load this run</h3>
+        <p style={{ color: 'var(--text-secondary)', margin: 0 }}>{fetchError || 'Run not found.'}</p>
         <Link to="/jobs" className="btn btn-secondary" style={{ padding: '8px 16px', fontSize: '0.9rem' }}>
-          Back to Job Runs
+          Back to Runs
         </Link>
       </div>
     );
@@ -130,9 +131,9 @@ export default function JobDetails() {
         </Link>
         <div style={{ display: 'flex', flex: 1, justifyContent: 'space-between', alignItems: 'center', gap: '16px', flexWrap: 'wrap' }}>
           <div>
-            <h1 className="text-gradient" style={{ margin: 0 }}>Job Execution #{jobId}</h1>
+            <h1 className="text-gradient" style={{ margin: 0 }}>Run #{jobId}</h1>
             <p style={{ margin: '4px 0 0 0', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
-              App: <strong>{job.application?.name}</strong> • Schema: <strong>{job.targetSchema}</strong>
+              Migration: <strong>{job.application?.name}</strong> • Destination schema: <strong>{job.targetSchema}</strong>
             </p>
           </div>
           <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
@@ -142,12 +143,11 @@ export default function JobDetails() {
                 borderRadius: '20px',
                 fontSize: '0.8rem',
                 fontWeight: 'bold',
-                textTransform: 'uppercase',
                 background: status === 'Running' ? 'rgba(59, 130, 246, 0.1)' : 'rgba(255,255,255,0.05)',
-                color: status === 'Running' ? '#60a5fa' : 'var(--text-secondary)'
+                color: statusColor(status)
               }}
             >
-              {job.status}
+              {statusLabel(status)}
             </span>
 
             {canControl && canPause && (
@@ -181,7 +181,7 @@ export default function JobDetails() {
                 disabled={!!actionBusy}
                 onClick={() => runCommand(
                   'retry_failed',
-                  'Retry failed/cancelled tables and chunks for this job?'
+                  'Retry the failed and cancelled tables in this run?'
                 )}
                 style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.85rem', color: '#60a5fa', borderColor: 'rgba(96,165,250,0.45)' }}
               >
@@ -196,12 +196,12 @@ export default function JobDetails() {
                 disabled={!!actionBusy}
                 onClick={() => runCommand(
                   'cancel',
-                  'Cancel this job?\n\nIn-flight chunks will stop claiming new work. Target tables are not dropped.'
+                  'Cancel this run?\n\nBatches that are already running will stop taking new work. Destination tables are not deleted.'
                 )}
                 style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.85rem', color: '#f87171', borderColor: 'rgba(248,113,113,0.4)' }}
               >
                 <Ban size={15} />
-                {actionBusy === 'cancel' ? '…' : 'Cancel job'}
+                {actionBusy === 'cancel' ? '…' : 'Cancel run'}
               </button>
             )}
           </div>
@@ -216,7 +216,7 @@ export default function JobDetails() {
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '16px' }}>
         <div className="card" style={{ padding: '20px' }}>
-          <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Rows Migrated</span>
+          <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Rows Copied</span>
           <h2 style={{ margin: '8px 0 0 0', fontSize: '1.8rem' }}>{totalRowsMigrated.toLocaleString()}</h2>
         </div>
         <div className="card" style={{ padding: '20px' }}>
@@ -224,13 +224,13 @@ export default function JobDetails() {
           <h2 style={{ margin: '8px 0 0 0', fontSize: '1.8rem' }}>{(totalBytesMigrated / (1024 * 1024)).toFixed(2)} MB</h2>
         </div>
         <div className="card" style={{ padding: '20px' }}>
-          <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Active Rate</span>
+          <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Current Speed</span>
           <h2 style={{ margin: '8px 0 0 0', fontSize: '1.8rem', color: '#60a5fa' }}>
-            {latestMetric ? `${latestMetric.rowsPerSecond.toLocaleString()} R/s` : '0 R/s'}
+            {latestMetric ? `${latestMetric.rowsPerSecond.toLocaleString()} rows/sec` : '0 rows/sec'}
           </h2>
         </div>
         <div className="card" style={{ padding: '20px' }}>
-          <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Active Workers</span>
+          <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Batches Running</span>
           <h2 style={{ margin: '8px 0 0 0', fontSize: '1.8rem', color: '#34d399' }}>
             {latestMetric ? latestMetric.activeChunkWorkers : 0} / 16
           </h2>
@@ -238,7 +238,7 @@ export default function JobDetails() {
       </div>
 
       <div className="card">
-        <h3 style={{ margin: '0 0 16px 0' }}>Table-wise Migration Progress</h3>
+        <h3 style={{ margin: '0 0 16px 0' }}>Tables in this run</h3>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
           {job.tableRuns?.map((t: any) => {
@@ -249,12 +249,7 @@ export default function JobDetails() {
             const completedChunks = t.chunks?.filter((c: any) => c.status === 'Done').length || 0;
             const pctChunks = totalChunks > 0 ? Math.round((completedChunks / totalChunks) * 100) : 0;
 
-            let statusColor = 'var(--text-secondary)';
-            if (t.status === 'Loading') statusColor = '#3b82f6';
-            if (t.status === 'Validating') statusColor = '#fbbf24';
-            if (t.status === 'Completed') statusColor = '#10b981';
-            if (t.status === 'CompletedWithErrors') statusColor = '#f59e0b';
-            if (t.status === 'Failed' || t.status === 'Cancelled') statusColor = '#ef4444';
+            const tableStatusColor = statusColor(t.status);
 
             return (
               <div
@@ -281,7 +276,12 @@ export default function JobDetails() {
                     <div>
                       <h4 style={{ margin: 0, fontSize: '1.05rem' }}>{t.manifestTable?.tableName}</h4>
                       <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-                        Target: <span style={{ fontFamily: 'monospace' }}>{t.targetTableName}</span>
+                        Destination: <span style={{ fontFamily: 'monospace' }}>{t.targetTableName}</span>
+                        {t.targetTablePreExisted != null && (
+                          <span style={{ marginLeft: '8px', fontSize: '0.7rem', color: t.targetTablePreExisted ? '#60a5fa' : '#10b981' }}>
+                            {t.targetTablePreExisted ? 'reused the existing table' : 'created the table'}
+                          </span>
+                        )}
                       </span>
                     </div>
                   </div>
@@ -289,7 +289,7 @@ export default function JobDetails() {
                   <div style={{ display: 'flex', gap: '24px', alignItems: 'center' }}>
                     <div style={{ width: '120px' }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', marginBottom: '4px' }}>
-                        <span>Chunks</span>
+                        <span>Batches</span>
                         <span>{pctChunks}%</span>
                       </div>
                       <div style={{ height: '6px', background: 'rgba(255,255,255,0.05)', borderRadius: '3px', overflow: 'hidden' }}>
@@ -298,8 +298,8 @@ export default function JobDetails() {
                     </div>
 
                     <div style={{ width: '100px', textAlign: 'right' }}>
-                      <span style={{ fontSize: '0.85rem', color: statusColor, fontWeight: 'bold' }}>
-                        {t.status}
+                      <span style={{ fontSize: '0.85rem', color: tableStatusColor, fontWeight: 'bold' }}>
+                        {statusLabel(t.status)}
                       </span>
                     </div>
                   </div>
@@ -309,14 +309,13 @@ export default function JobDetails() {
                   <div style={{ borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '16px', marginTop: '4px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
                     <div>
                       <span style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '8px' }}>
-                        Chunk Heatmap ({completedChunks} / {totalChunks} chunks done)
+                        Batch progress ({completedChunks} of {totalChunks} batches done)
                       </span>
                       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
                         {t.chunks?.map((chunk: any) => {
-                          let color = 'rgba(255, 255, 255, 0.05)';
-                          if (chunk.status === 'Running') color = '#3b82f6';
-                          if (chunk.status === 'Done') color = '#10b981';
-                          if (chunk.status === 'Failed' || chunk.status === 'Cancelled') color = '#ef4444';
+                          const color = chunk.status === 'Pending'
+                            ? 'rgba(255, 255, 255, 0.05)'
+                            : statusColor(chunk.status);
 
                           return (
                             <div
@@ -328,7 +327,7 @@ export default function JobDetails() {
                                 background: color,
                                 border: '1px solid rgba(255,255,255,0.02)'
                               }}
-                              title={`Chunk ID ${chunk.id}: ${chunk.status} ${chunk.errorMessage || ''}`}
+                              title={`Batch ${chunk.chunkIndex ?? chunk.id}: ${statusLabel(chunk.status)}${chunk.errorMessage ? ` — ${chunk.errorMessage}` : ''}`}
                             />
                           );
                         })}
@@ -339,29 +338,31 @@ export default function JobDetails() {
                       <div className="card" style={{ background: 'rgba(255,255,255,0.01)', border: '1px solid rgba(255,255,255,0.03)', padding: '12px' }}>
                         <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Metrics</span>
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', fontSize: '0.85rem', marginTop: '8px' }}>
-                          <div>Rows Load: {t.rowsMigrated?.toLocaleString() || 0}</div>
-                          <div>Data Load: {((t.bytesMigrated || 0) / 1024).toFixed(2)} KB</div>
+                          <div>Rows copied: {t.rowsMigrated?.toLocaleString() || 0}</div>
+                          <div>Data copied: {((t.bytesMigrated || 0) / 1024).toFixed(2)} KB</div>
                         </div>
                         {t.errorMessage && (
-                          <p style={{ margin: '8px 0 0', fontSize: '0.75rem', color: '#f87171' }}>{t.errorMessage}</p>
+                          // pre-wrap matters: a target-schema mismatch lists one problem per line,
+                          // and the default white-space would collapse it into one unreadable run.
+                          <p style={{ margin: '8px 0 0', fontSize: '0.75rem', color: '#f87171', whiteSpace: 'pre-wrap' }}>{t.errorMessage}</p>
                         )}
                       </div>
 
                       <div className="card" style={{ background: 'rgba(255,255,255,0.01)', border: '1px solid rgba(255,255,255,0.03)', padding: '12px' }}>
-                        <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Post-Migration Verification</span>
+                        <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Row count check</span>
                         {validation ? (
                           <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '0.85rem', marginTop: '8px' }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: validation.passed ? '#10b981' : '#f87171' }}>
                               {validation.passed ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
-                              <span>{validation.passed ? 'Count verification passed' : 'Count mismatch or validation failed'}</span>
+                              <span>{validation.passed ? 'Row counts match' : 'Row counts do not match'}</span>
                             </div>
                             <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', fontFamily: 'monospace' }}>
-                              Oracle Src: {validation.sourceValue?.toLocaleString()} | PG Target: {validation.targetValue?.toLocaleString()}
+                              Source: {validation.sourceValue?.toLocaleString()} | Destination: {validation.targetValue?.toLocaleString()}
                             </div>
                           </div>
                         ) : (
                           <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', margin: '8px 0 0 0', fontStyle: 'italic' }}>
-                            Validation checks pending data load completion.
+                            The row count check runs once the data has finished copying.
                           </p>
                         )}
                       </div>

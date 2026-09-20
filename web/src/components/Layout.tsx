@@ -9,9 +9,9 @@ export default function Layout() {
 
   const navItems = [
     { name: 'Dashboard', path: '/', icon: <LayoutDashboard size={20} /> },
-    { name: 'Connections', path: '/connections', icon: <Database size={20} /> },
-    { name: 'Applications', path: '/applications', icon: <FolderTree size={20} /> },
-    { name: 'Job Runs', path: '/jobs', icon: <Activity size={20} /> },
+    { name: 'Databases', path: '/connections', icon: <Database size={20} /> },
+    { name: 'Migrations', path: '/applications', icon: <FolderTree size={20} /> },
+    { name: 'Runs', path: '/jobs', icon: <Activity size={20} /> },
     ...(hasRole('Admin') ? [{ name: 'Users', path: '/users', icon: <Users size={20} /> }] : []),
     { name: 'Settings', path: '/settings', icon: <Settings size={20} /> },
   ];
@@ -21,7 +21,7 @@ export default function Layout() {
       <aside className="sidebar">
         <div style={{ marginBottom: '32px' }}>
           <h2 className="text-gradient" style={{ margin: 0 }}>O2P Migration Studio</h2>
-          <p style={{ fontSize: '0.85rem', margin: 0 }}>Oracle to PostgreSQL Control Center</p>
+          <p style={{ fontSize: '0.85rem', margin: 0 }}>Copy data from Oracle to PostgreSQL</p>
         </div>
         
         <nav className="flex-col gap-2">

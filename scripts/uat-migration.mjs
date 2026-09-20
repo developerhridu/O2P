@@ -85,7 +85,7 @@ async function run() {
 
   // 2. Connections: test both real connections
   await page.goto(`${baseUrl}/connections`, { waitUntil: 'networkidle' });
-  await page.getByRole('heading', { name: /connection profiles/i }).waitFor();
+  await page.getByRole('heading', { name: /^databases$/i }).waitFor();
   await snap('connections');
   const connRows = page.locator('tr').filter({ hasText: /Test/ });
   const rowCount = await connRows.count();
@@ -104,23 +104,23 @@ async function run() {
 
   // 3. Open the Biometric application detail
   await page.goto(`${baseUrl}/applications`, { waitUntil: 'networkidle' });
-  await page.getByRole('heading', { name: /^applications$/i }).waitFor();
+  await page.getByRole('heading', { name: /^migrations$/i }).waitFor();
   await snap('applications');
   const appName = process.env.O2P_UAT_APP || 'Biometric Application';
   step(`opening application "${appName}"`);
   const appCard = page.locator('h3', { hasText: appName }).locator('xpath=ancestor::div[contains(@class,"group")][1]');
   await appCard.getByRole('link', { name: /manage/i }).click();
   await page.waitForURL(/\/applications\/\d+$/);
-  await page.getByRole('heading', { name: /migration manifests/i }).waitFor();
+  await page.getByRole('heading', { name: /table selections/i }).waitFor();
   await snap('application-detail');
-  step(`app has ${await page.getByRole('button', { name: /run job/i }).count()} runnable manifest(s)`);
+  step(`app has ${await page.getByRole('button', { name: /start run/i }).count()} runnable manifest(s)`);
 
   // 4. Sweep the remaining pages for JS / API errors
   for (const [route, heading, name] of [
     ['/discovery', /discovery/i, 'discovery'],
     ['/settings', /global settings/i, 'settings'],
     ['/users', /users/i, 'users'],
-    ['/jobs', /job runs/i, 'job-runs'],
+    ['/jobs', /^runs$/i, 'job-runs'],
   ]) {
     await page.goto(`${baseUrl}${route}`, { waitUntil: 'networkidle' });
     try { await page.getByRole('heading', { name: heading }).first().waitFor({ timeout: 8000 }); } catch { /* heading optional */ }
@@ -143,8 +143,8 @@ async function run() {
 
   // 6. The "Cancel All & Restart Worker" admin button (dialogs auto-accepted by the global handler)
   await page.goto(`${baseUrl}/jobs`, { waitUntil: 'networkidle' });
-  await page.getByRole('heading', { name: /job runs/i }).waitFor();
-  const resetBtn = page.getByRole('button', { name: /cancel all & restart worker/i });
+  await page.getByRole('heading', { name: /^runs$/i }).waitFor();
+  const resetBtn = page.getByRole('button', { name: /cancel all & restart copier/i });
   if (await resetBtn.count()) {
     step('clicking "Cancel All & Restart Worker"');
     await resetBtn.click();

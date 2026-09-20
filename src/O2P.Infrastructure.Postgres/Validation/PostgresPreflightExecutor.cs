@@ -55,7 +55,13 @@ namespace O2P.Infrastructure.Postgres.Validation
             }
         }
 
-        public async Task<bool> CheckSchemaPrivilegesAsync(Connection targetConnection, string password, string schema, CancellationToken cancellationToken)
+        public Task<bool> CheckSchemaPrivilegesAsync(Connection targetConnection, string password, string schema, CancellationToken cancellationToken) =>
+            HasSchemaPrivilegeAsync(targetConnection, password, schema, "USAGE, CREATE", cancellationToken);
+
+        public Task<bool> CheckSchemaUsageAsync(Connection targetConnection, string password, string schema, CancellationToken cancellationToken) =>
+            HasSchemaPrivilegeAsync(targetConnection, password, schema, "USAGE", cancellationToken);
+
+        private async Task<bool> HasSchemaPrivilegeAsync(Connection targetConnection, string password, string schema, string privileges, CancellationToken cancellationToken)
         {
             try
             {
@@ -63,14 +69,15 @@ namespace O2P.Infrastructure.Postgres.Validation
                 await conn.OpenAsync(cancellationToken);
 
                 using var cmd = conn.CreateCommand();
-                cmd.CommandText = "SELECT has_schema_privilege(@schema, 'USAGE, CREATE')";
+                cmd.CommandText = "SELECT has_schema_privilege(@schema, @privileges)";
                 cmd.Parameters.AddWithValue("schema", schema);
+                cmd.Parameters.AddWithValue("privileges", privileges);
                 var hasPriv = await cmd.ExecuteScalarAsync(cancellationToken);
                 return Convert.ToBoolean(hasPriv);
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Postgres schema privilege check failed for schema {Schema}", schema);
+                _logger.LogWarning(ex, "Postgres schema privilege check ({Privileges}) failed for schema {Schema}", privileges, schema);
                 return false;
             }
         }

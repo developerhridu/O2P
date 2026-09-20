@@ -57,12 +57,12 @@ namespace O2P.Api.Controllers
         {
             if (string.IsNullOrWhiteSpace(request.Name) || string.IsNullOrWhiteSpace(request.Host))
             {
-                return BadRequest("Connection Name and Host are required.");
+                return BadRequest("A name and host are required.");
             }
 
             if (await _db.Connections.AnyAsync(c => c.Name == request.Name))
             {
-                return Conflict($"A connection profile named \"{request.Name}\" already exists. Choose a different name.");
+                return Conflict($"A database named \"{request.Name}\" already exists. Choose a different name.");
             }
 
             var conn = new Connection
@@ -85,7 +85,7 @@ namespace O2P.Api.Controllers
             }
             catch (DbUpdateException)
             {
-                return Conflict($"A connection profile named \"{request.Name}\" already exists. Choose a different name.");
+                return Conflict($"A database named \"{request.Name}\" already exists. Choose a different name.");
             }
 
             conn.SecretCiphertext = System.Array.Empty<byte>(); // Mask in response
@@ -224,7 +224,7 @@ namespace O2P.Api.Controllers
                 {
                     success = false,
                     latencyMs = Math.Round((DateTime.UtcNow - latencyStart).TotalMilliseconds, 2),
-                    message = $"Connection failed: {ex.Message}",
+                    message = $"Could not connect: {ex.Message}",
                     serverVersion = "",
                     privileges = new[]
                     {
@@ -255,12 +255,12 @@ namespace O2P.Api.Controllers
 
             if (string.IsNullOrWhiteSpace(request.Name) || string.IsNullOrWhiteSpace(request.Host))
             {
-                return BadRequest("Connection Name and Host are required.");
+                return BadRequest("A name and host are required.");
             }
 
             if (await _db.Connections.AnyAsync(c => c.Name == request.Name && c.Id != id))
             {
-                return Conflict($"A connection profile named \"{request.Name}\" already exists. Choose a different name.");
+                return Conflict($"A database named \"{request.Name}\" already exists. Choose a different name.");
             }
 
             conn.Name = request.Name;
@@ -284,7 +284,7 @@ namespace O2P.Api.Controllers
             }
             catch (DbUpdateException)
             {
-                return Conflict($"A connection profile named \"{request.Name}\" already exists. Choose a different name.");
+                return Conflict($"A database named \"{request.Name}\" already exists. Choose a different name.");
             }
 
             conn.SecretCiphertext = System.Array.Empty<byte>(); // Mask in response

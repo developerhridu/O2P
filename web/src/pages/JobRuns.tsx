@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { Activity, RefreshCw, Power, Ban, RotateCcw } from 'lucide-react';
 import { fetchJobs, cancelAllAndRestartWorker, commandJob, hasRole } from '../api';
+import { commandLabel, statusColor, statusLabel } from '../labels';
 
 export default function JobRuns() {
   const [jobs, setJobs] = useState<any[]>([]);
@@ -22,7 +23,7 @@ export default function JobRuns() {
       const data = await fetchJobs();
       setJobs(data);
     } catch (err: any) {
-      console.error('Failed to load jobs', err);
+      console.error('Could not load runs', err);
     } finally {
       setLoading(false);
     }
@@ -30,17 +31,17 @@ export default function JobRuns() {
 
   const handleCancelAllAndRestart = async () => {
     if (!window.confirm(
-      'Cancel ALL running / queued / paused jobs and restart the worker?\n\n' +
-      'In-flight chunks will be stopped. Target tables are NOT dropped. This cannot be undone.'
+      'Cancel every waiting, running and paused run, and restart the copier?\n\n' +
+      'Batches that are already running will be stopped. Destination tables are NOT deleted. This cannot be undone.'
     )) return;
 
     setResetting(true);
     try {
       const r = await cancelAllAndRestartWorker();
-      alert(`Cancelled ${r.cancelledJobs} job(s), ${r.cancelledTables} table(s), ${r.cancelledChunks} chunk(s).\nWorker restart requested.`);
+      alert(`Cancelled ${r.cancelledJobs} run(s), ${r.cancelledTables} table(s), ${r.cancelledChunks} batch(es).\nThe copier is restarting.`);
       await loadJobs();
     } catch (err: any) {
-      alert(err.message || 'Failed to cancel jobs / restart worker');
+      alert(err.message || "Couldn't cancel the runs or restart the copier.");
     } finally {
       setResetting(false);
     }
@@ -53,7 +54,7 @@ export default function JobRuns() {
       await commandJob(jobId, command);
       await loadJobs();
     } catch (err: any) {
-      alert(err.message || `Failed to ${command}`);
+      alert(err.message || `Couldn't ${commandLabel(command)}.`);
     } finally {
       setBusyJobId(null);
     }
@@ -67,9 +68,9 @@ export default function JobRuns() {
     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '16px' }}>
         <div>
-          <h1 className="text-gradient" style={{ margin: 0 }}>Job Runs</h1>
+          <h1 className="text-gradient" style={{ margin: 0 }}>Runs</h1>
           <p style={{ margin: '4px 0 0 0', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
-            Monitor active and historical migration executions.
+            Watch runs in progress and review past ones.
           </p>
         </div>
         {hasRole('Admin') && (
@@ -77,17 +78,17 @@ export default function JobRuns() {
             className="btn btn-secondary"
             onClick={handleCancelAllAndRestart}
             disabled={resetting}
-            title="Cancel every running/queued/paused job and restart the worker"
+            title="Cancel every waiting, running and paused run, and restart the copier"
             style={{ display: 'flex', alignItems: 'center', gap: '8px', whiteSpace: 'nowrap', color: '#f87171', borderColor: 'rgba(248,113,113,0.4)' }}
           >
             <Power size={16} />
-            {resetting ? 'Working…' : 'Cancel All & Restart Worker'}
+            {resetting ? 'Working…' : 'Cancel All & Restart Copier'}
           </button>
         )}
       </div>
 
       <div className="card">
-        <h3 style={{ margin: '0 0 16px 0' }}>Migration Runs</h3>
+        <h3 style={{ margin: '0 0 16px 0' }}>All runs</h3>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
           {jobs.map(job => {
@@ -126,7 +127,7 @@ export default function JobRuns() {
                   <div>
                     <h4 style={{ margin: 0 }}>Run #{job.id}</h4>
                     <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                      App: {job.application?.name} • Target Schema: {job.targetSchema}
+                      Migration: {job.application?.name} • Destination schema: {job.targetSchema}
                     </span>
                   </div>
                 </div>
@@ -139,10 +140,10 @@ export default function JobRuns() {
                       fontSize: '0.75rem',
                       fontWeight: 'bold',
                       background: job.status === 'Running' ? 'rgba(59, 130, 246, 0.1)' : 'rgba(255, 255, 255, 0.05)',
-                      color: job.status === 'Running' ? '#60a5fa' : 'var(--text-secondary)'
+                      color: statusColor(job.status)
                     }}
                   >
-                    {job.status}
+                    {statusLabel(job.status)}
                   </span>
 
                   {canControl && canRetry && (
@@ -153,7 +154,7 @@ export default function JobRuns() {
                       onClick={() => runJobCommand(
                         job.id,
                         'retry_failed',
-                        `Retry failed/cancelled work for job #${job.id}?`
+                        `Retry the failed and cancelled tables in run #${job.id}?`
                       )}
                       style={{ padding: '6px 10px', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '4px', color: '#60a5fa', borderColor: 'rgba(96,165,250,0.45)' }}
                     >
@@ -170,17 +171,17 @@ export default function JobRuns() {
                       onClick={() => runJobCommand(
                         job.id,
                         'cancel',
-                        `Cancel job #${job.id}? Target tables are not dropped.`
+                        `Cancel run #${job.id}? Destination tables are not deleted.`
                       )}
                       style={{ padding: '6px 10px', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '4px', color: '#f87171', borderColor: 'rgba(248,113,113,0.4)' }}
                     >
                       <Ban size={14} />
-                      Cancel
+                      Cancel run
                     </button>
                   )}
 
                   <Link to={`/jobs/${job.id}`} className="btn btn-secondary" style={{ padding: '6px 12px', fontSize: '0.85rem' }}>
-                    View Details
+                    View details
                   </Link>
                 </div>
               </div>
@@ -189,7 +190,7 @@ export default function JobRuns() {
 
           {jobs.length === 0 && (
             <div style={{ textAlign: 'center', color: 'var(--text-secondary)', padding: '32px 0' }}>
-              No migration jobs have been executed yet. Go to your Application to launch one.
+              Nothing has run yet. Open a migration to start one.
             </div>
           )}
         </div>

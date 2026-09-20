@@ -121,8 +121,8 @@ export default function Users() {
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight">Users & Roles</h1>
-          <p className="mt-1 text-sm text-slate-400">Manage operator access, role assignment, lockouts, and password reset flows.</p>
+          <h1 className="text-3xl font-bold tracking-tight">Users</h1>
+          <p className="mt-1 text-sm text-slate-400">Add people, set what they can do, unlock accounts and reset passwords.</p>
         </div>
         <button onClick={openCreate} className="btn">
           <Plus size={18} />
@@ -170,7 +170,7 @@ export default function Users() {
                     {user.lockoutEnd && <div className="text-xs text-amber-300">Locked until {new Date(user.lockoutEnd).toLocaleString()}</div>}
                   </td>
                   <td className="px-6 py-4 text-sm">
-                    {user.mustChangePassword ? <span className="text-amber-300">Change required</span> : <span className="text-slate-400">Current</span>}
+                    {user.mustChangePassword ? <span className="text-amber-300">Must change</span> : <span className="text-slate-400">Current</span>}
                   </td>
                   <td className="px-6 py-4 text-sm text-slate-400">
                     {user.lastLoginAt ? new Date(user.lastLoginAt).toLocaleString() : 'Never'}

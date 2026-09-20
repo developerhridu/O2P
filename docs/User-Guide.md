@@ -2,7 +2,33 @@
 
 > Prefer a screen-by-screen walkthrough of the web UI? See the [UI Guide](UI-Guide.md).
 
-This guide describes the behavior implemented in the current O2P codebase. O2P is an Oracle-to-PostgreSQL migration control plane: it discovers Oracle tables, records a migration manifest, creates or reuses same-named PostgreSQL tables, copies data in chunks, and compares source and target row counts.
+This guide describes the behavior implemented in the current O2P codebase. O2P is an Oracle-to-PostgreSQL migration control plane: it scans Oracle tables, records which ones you picked, creates or reuses same-named PostgreSQL tables, copies data in batches, and compares source and destination row counts.
+
+### The words the screens use
+
+The interface was reworded to use plainer terms. If you used an earlier version, or you are reading
+older notes, this is the mapping. The stored values, API routes and database are unchanged — only the
+words on screen and in messages.
+
+| You may have seen | It is now called | What it means |
+| --- | --- | --- |
+| `Application` | **Migration** | a named setup: its databases, table selections and runs |
+| `Job Run`, `Job` | **Run** | one execution of a migration |
+| `Manifest` | **Table Selection** | the tables you chose, with any row filters |
+| `Manifest Builder` | **Select Tables** | the screen where you choose them |
+| `Chunk` | **Batch** | one slice of a table, copied in parallel with others |
+| `Discovery`, `Dictionary` | **Scan** | reading the source database to list its tables |
+| `Preflight` | **Readiness check** | the checks run before a run starts |
+| `Validation`, `Verification` | **Row count check** | comparing source and destination row counts |
+| `Connection`, `Connection Profile` | **Database** | a saved database you can connect to |
+| `Connection Slot` | **Database role** | shown as `Source · Test`, `Target · Live` |
+| `Owner` | **Source schema** | the Oracle schema the tables live in |
+
+Job and table states are shown as plain words too: `Queued` and `Pending` read as **Waiting**,
+`Creating` as **Preparing**, `Loading` as **Copying**, `Validating` as **Checking rows**, `Completed`
+as **Finished**, and `CompletedWithErrors` as **Finished with errors**. The values stored in the
+database and returned by the API keep their original spellings, so scripts and integrations are
+unaffected.
 
 > **Important safety warning**
 >
@@ -15,9 +41,9 @@ This guide describes the behavior implemented in the current O2P codebase. O2P i
 O2P provides:
 
 - a React web UI for configuration and operations;
-- a .NET 8 API for authentication, metadata, preflight checks, and job commands;
+- a .NET 8 API for authentication, metadata, readiness checks, and job commands;
 - a .NET 8 Worker that plans and executes migrations;
-- a PostgreSQL metadata database that stores users, encrypted connection passwords, applications, manifests, jobs, chunks, metrics, and validation results.
+- a PostgreSQL metadata database that stores users, encrypted connection passwords, migrations, table selections, jobs, batches, metrics, and validation results.
 
 ### Supported migration direction
 
@@ -35,13 +61,13 @@ The current implementation does **not** provide PostgreSQL-to-Oracle, Oracle-to-
 2. Sign in and change the bootstrap password if prompted.
 3. Create and test an Oracle source profile.
 4. Create and test a PostgreSQL target profile.
-5. Create an Application and bind its Oracle/PostgreSQL Test or Live slots.
+5. Create a migration and bind its Oracle/PostgreSQL Test or Live slots.
 6. Discover an Oracle owner/schema.
-7. Create and review a manifest of tables and optional row filters.
+7. Create and review a table selection of tables and optional row filters.
 8. Create and launch a job.
-9. The API runs mandatory preflight checks and queues the job.
-10. The Worker creates or truncates target tables, plans chunks, copies rows, restores captured constraints, and validates row counts.
-11. Review the job, table, chunk, metric, and validation status in the UI.
+9. The API runs mandatory readiness checks and queues the job.
+10. The Worker creates missing target tables, or verifies and truncates existing ones, plans batches, copies rows, restores captured constraints, and validates row counts.
+11. Review the job, table, batch, metric, and validation status in the UI.
 
 ### What is and is not migrated
 
@@ -92,7 +118,7 @@ You need three logical connections:
 
 1. **Metadata PostgreSQL** — used internally by the API and Worker.
 2. **Source Oracle** — read by discovery, planning, copy, and validation.
-3. **Target PostgreSQL** — modified by preflight, DDL, truncate, COPY, constraint handling, and validation.
+3. **Target PostgreSQL** — modified by readiness check, DDL, truncate, COPY, constraint handling, and validation.
 
 Do not confuse the metadata PostgreSQL database with the migration target.
 
@@ -101,12 +127,12 @@ Do not confuse the metadata PostgreSQL database with the migration target.
 The source account must be able to:
 
 - connect to Oracle;
-- `SELECT` every source table included in the manifest;
+- `SELECT` every source table included in the table selection;
 - query `ALL_TABLES` and `ALL_TAB_COLUMNS`;
 - query `SESSION_PRIVS`;
 - query `ALL_CONSTRAINTS` and `ALL_CONS_COLUMNS` when numeric primary-key chunking is needed.
 
-Additional dictionary access improves discovery statistics and ROWID/partition chunk planning:
+Additional dictionary access improves discovery statistics and ROWID/partition batch planning:
 
 - `ALL_SEGMENTS`, `ALL_LOBS`, `ALL_EXTENTS`, `ALL_OBJECTS`, and `ALL_TAB_PARTITIONS`; or
 - corresponding `DBA_*` views when `SELECT ANY DICTIONARY` is granted.
@@ -264,7 +290,7 @@ $env:O2P_ADMIN_PASSWORD = "<STRONG_BOOTSTRAP_PASSWORD>"
 
 Relevant parameters are `-UiPort` (default `3051`), `-ProxyPort` (default `3052`), `-ApiPort` (default `5050`), `-SkipFirewall`, `-SkipBuild`, `-NoWorker`, and `-WorkerOnly`.
 
-Run the Worker on exactly one machine. The current Worker is not safe for a multi-node deployment: table preparation has no distributed claim, and any newly starting Worker requeues all `Running` chunks, including work owned by another live Worker.
+Run the Worker on exactly one machine. The current Worker is not safe for a multi-node deployment: table preparation has no distributed claim, and any newly starting Worker requeues all `Running` batches, including work owned by another live Worker.
 
 The script launches background processes, not Windows Services. API/proxy/UI do not have durable crash/reboot supervision; production operators must provide an appropriate service manager. The API launch script also binds to all interfaces, so restrict the API port with host firewall rules or bind it safely behind a reverse proxy.
 
@@ -302,7 +328,7 @@ The individual Windows scripts under `scripts/` expect pre-published output unde
 
 ### Kubernetes warning
 
-The checked-in Kubernetes manifests are templates, not a verified turnkey deployment. In particular, they currently use `ConnectionStrings__Metadata`, while the application reads `ConnectionStrings__MetadataDb`, and their image/container-port assumptions must be aligned with the Dockerfiles. Correct and validate the manifests before production use.
+The checked-in Kubernetes table selections are templates, not a verified turnkey deployment. In particular, they currently use `ConnectionStrings__Metadata`, while the migration reads `ConnectionStrings__MetadataDb`, and their image/container-port assumptions must be aligned with the Dockerfiles. Correct and validate the table selections before production use.
 
 ## 4. Database Configuration
 
@@ -364,7 +390,7 @@ PostgreSQL test results include:
 - server version;
 - whether a temporary table can be created and dropped.
 
-This profile test is useful but not sufficient for migration. Job launch performs a stronger target-schema preflight.
+This profile test is useful but not sufficient for migration. Job launch performs a stronger target-schema readiness check.
 
 ### Credential handling
 
@@ -372,12 +398,12 @@ Connection passwords are encrypted in the metadata database using ASP.NET Data P
 
 ## 5. Migration Configuration
 
-### Applications and environment slots
+### Migrations and environment slots
 
-An Application groups connection bindings, manifests, and jobs for one system.
+An Migration groups connection bindings, table selections, and jobs for one system.
 
-1. Open **Applications**.
-2. Select **New Application**.
+1. Open **Migrations**.
+2. Select **New Migration**.
 3. Enter a unique name and optional description.
 4. Select **Manage**.
 5. Assign the required slots:
@@ -397,7 +423,7 @@ Discovery uses an Oracle profile plus an owner/schema name. Owner and requested 
 
 Two supported UI paths are available:
 
-- **Auto-Gen Manifest** performs a full owner scan and creates a manifest immediately.
+- **Auto-Gen Table Selection** performs a full owner scan and creates a table selection immediately.
 - **Custom Builder** lets you run a full **Refresh Dictionary** scan or paste specific table names.
 
 A full scan replaces the cached discovery rows for that connection and owner. A targeted lookup replaces only the requested cached tables and leaves other cached tables intact.
@@ -412,14 +438,14 @@ Discovery records:
 
 Estimates may be missing or stale because they come from Oracle catalog statistics. They are planning information, not final validation.
 
-The standalone **Discovery** navigation page is currently a visual placeholder and does not call the API. Use Application → **Auto-Gen Manifest** or **Custom Builder**.
+The standalone **Discovery** navigation page is currently a visual placeholder and does not call the API. Use Migration → **Auto-Gen Table Selection** or **Custom Builder**.
 
-### Manifest options
+### Table Selection options
 
 In the Custom Builder, users can:
 
 - include or exclude whole tables with the checkbox;
-- remove tables from the manifest;
+- remove tables from the table selection;
 - search the current list;
 - add specific table names, one per line or comma-separated;
 - set a per-table Oracle filter predicate.
@@ -470,11 +496,32 @@ At job launch:
 - target table name is always the source table name;
 - identifiers are quoted and case-preserved;
 - no `_mgN` suffix is allocated;
-- a missing table is created with manifest columns;
-- an existing table is **not altered** to match the manifest;
-- an existing table is truncated before load.
+- a missing table is created with table selection columns;
+- an existing table is **not altered** to match the table selection — no `CREATE`, no `ALTER` is issued for it;
+- an existing table is checked for compatibility, then truncated before load.
 
-Before reusing an existing table, compare column names, order, data types, and nullability to the manifest. `CREATE TABLE IF NOT EXISTS` does not reconcile differences.
+**Compatibility check on an existing table.** Before anything is dropped or truncated, O2P reads the
+target's real columns from `pg_attribute` and compares them to the table selection. If they cannot accept the
+data, that one table fails with a message naming every problem, **nothing is altered, truncated or
+loaded**, and the job's other tables carry on. Fix the target (or exclude the columns in the table selection)
+and use **Retry failed**.
+
+A table is blocked when:
+
+- a table selection column is missing from the target (names are case-sensitive — Oracle yields `EMP_ID`,
+  a hand-built table often has `emp_id`; the message names the real spelling);
+- the type family differs (text vs numeric vs timestamp vs bytea);
+- a fixed-width type differs at all, **widening included** — `integer` into `bigint` fails, because
+  binary `COPY` carries no type OIDs and the bytes are written from the table selection type;
+- the target is narrower (`varchar(100)` for a `varchar(255)` column, `numeric(8,2)` for
+  `numeric(10,2)`, or a smaller scale, which PostgreSQL would round away silently);
+- `timestamp` meets `timestamp with time zone` in either direction — `COPY` accepts this and
+  silently reinterprets every value;
+- `text` meets `bytea` — also accepted silently, storing corrupt bytes;
+- the target has an extra `NOT NULL` column with no default, identity or generation expression.
+
+Column *order* is never a problem: `COPY` names its columns explicitly. A target that is wider, or
+looser about nulls, is fine.
 
 ### Chunking, batch size, and concurrency
 
@@ -482,12 +529,12 @@ There is no user-configurable batch-size option.
 
 Implemented execution values:
 
-- planner target: `16` chunks per table, hard-coded;
+- planner target: `16` batches per table, hard-coded;
 - bounded in-memory channel: `1,000` rows;
-- one PostgreSQL binary COPY transaction per chunk;
+- one PostgreSQL binary COPY transaction per batch;
 - fixed worker-wide rate limiter: `50,000` rows/second with a `10,000`-row burst;
-- Worker defaults: `8` Oracle sessions and `8` chunk workers;
-- chunk timeout: `20` minutes by default;
+- Worker defaults: `8` Oracle sessions and `8` batch workers;
+- batch timeout: `20` minutes by default;
 - metrics sample interval: `2` seconds.
 
 Configure effective concurrency in `src/O2P.Worker/appsettings.json`, `src/O2P.Worker/appsettings.Development.json`, or environment variables:
@@ -500,9 +547,9 @@ $env:Concurrency__ChunkTimeoutMinutes = "30"
 
 The **Settings** screen stores values only in browser `localStorage`. It does not update the Worker, planner, rate limiter, validation, metrics interval, or retention behavior. Treat that screen as non-operational in the current version.
 
-Application `DefaultsJson` and Connection `OptionsJson` are also stored but not consumed by the Worker. The API accepts an `update_throttle` job command, but the Worker does not implement it. Effective runtime tuning is limited to the Worker configuration described above.
+Migration `DefaultsJson` and Connection `OptionsJson` are also stored but not consumed by the Worker. The API accepts an `update_throttle` job command, but the Worker does not implement it. Effective runtime tuning is limited to the Worker configuration described above.
 
-### Chunk strategies
+### Batch strategies
 
 The Worker chooses automatically:
 
@@ -510,9 +557,9 @@ The Worker chooses automatically:
 - partitioned table: partition lanes, with per-partition ROWID ranges when possible;
 - IOT or fallback: ranges over a single-column numeric primary key;
 - heap fallback: hashed ROWID buckets;
-- final fallback: one whole table or partition chunk.
+- final fallback: one whole table or partition batch.
 
-Chunk strategy is not user-selectable.
+Batch strategy is not user-selectable.
 
 ## 6. Migration Process
 
@@ -531,18 +578,18 @@ Chunk strategy is not user-selectable.
 4. Click **Test**.
 5. Independently verify the account can create, truncate, alter, and COPY into tables in that schema.
 
-### 3. Create and bind an Application
+### 3. Create and bind a migration
 
-1. Open **Applications** → **New Application**.
+1. Open **Migrations** → **New Migration**.
 2. Open **Manage**.
 3. Assign the Oracle source profile to `Oracle Test` or `Oracle Live`.
 4. Assign the PostgreSQL target profile to `Postgres Test` or `Postgres Live`.
 
 ### 4. Discover and configure tables
 
-For a quick full-schema manifest:
+For a quick full-schema table selection:
 
-1. Select **Auto-Gen Manifest**.
+1. Select **Auto-Gen Table Selection**.
 2. Choose the Oracle profile.
 3. Enter the Oracle owner/schema.
 4. Select **Generate**.
@@ -554,13 +601,13 @@ For controlled selection:
 3. Select **Refresh Dictionary**, or paste specific table names and select **Add Tables**.
 4. Uncheck unwanted tables.
 5. Add DBA-reviewed filter predicates where required.
-6. Select **Save Manifest**.
+6. Select **Save Table Selection**.
 
 ### 5. Review before launch
 
 Verify:
 
-- the manifest contains only intended tables;
+- the table selection contains only intended tables;
 - no selected table shows `NO COLUMNS`;
 - estimated sizes are plausible;
 - generated data types are compatible;
@@ -571,8 +618,8 @@ Verify:
 
 ### 6. Start migration
 
-1. Return to Application **Manage**.
-2. Select **Run Job** on the desired manifest.
+1. Return to Migration **Manage**.
+2. Select **Run Job** on the desired table selection.
 3. Select the source and target slots.
 4. Enter the target PostgreSQL schema.
 5. Select **Launch Migration**.
@@ -581,18 +628,18 @@ The API:
 
 1. creates the job in `Draft`;
 2. verifies source and target slot bindings;
-3. runs preflight automatically;
-4. rejects the launch if preflight fails;
+3. runs readiness check automatically;
+4. rejects the launch if readiness check fails;
 5. records a launch command and changes the job to `Queued`.
 
-Preflight verifies:
+Readiness check verifies:
 
 - Oracle connection and ability to query `SESSION_PRIVS`;
 - PostgreSQL version 14+;
 - PostgreSQL `USAGE` and `CREATE` privileges on the target schema;
 - create/insert/drop of a probe table.
 
-The Oracle preflight currently treats successful access to `SESSION_PRIVS` as success; it does not enforce a nonzero count of particular privileges. A passing preflight therefore does not replace a real test of every selected source table.
+The Oracle readiness check currently treats successful access to `SESSION_PRIVS` as success; it does not enforce a nonzero count of particular privileges. A passing readiness check therefore does not replace a real test of every selected source table.
 
 ### 7. Monitor progress
 
@@ -604,13 +651,13 @@ Table: Pending → Creating → Planning → Loading → Validating → Complete
 Chunk: Pending → Running → Done / Failed
 ```
 
-Open **Job Runs** → **View Details**. See section 8 for all indicators.
+Open **Runs** → **View Details**. See section 8 for all indicators.
 
 ### 8. Handle errors
 
-- Expand a table to inspect its error message and failed chunk tooltips.
+- Expand a table to inspect its error message and failed batch tooltips.
 - Review API and Worker logs.
-- Use **Pause** to stop new chunk claims; already running chunks continue.
+- Use **Pause** to stop new batch claims; already running batches continue.
 - Use **Cancel job** to request cancellation and constraint restoration.
 - Do not use **Retry failed** as the default recovery after partial load failure; see section 11.
 
@@ -620,9 +667,9 @@ A clean run requires:
 
 - job status `Completed`;
 - every table status `Completed`;
-- every chunk status `Done`;
+- every batch status `Done`;
 - a passing row-count validation for every table;
-- independent target sampling and application-level checks.
+- independent target sampling and migration-level checks.
 
 `CompletedWithErrors` is not a successful migration. It means at least one table failed or row-count validation did not pass.
 
@@ -685,12 +732,12 @@ Back up any same-named target tables.
    - User: `TARGET_USER`
    - Password: provide securely
 3. Test both profiles.
-4. Create an Application named `Database A to B`.
+4. Create a migration named `Database A to B`.
 5. Bind:
    - Oracle Test → `Oracle A - Test`
    - Postgres Test → `Postgres B - Test`
 
-### Build the manifest
+### Build the table selection
 
 1. Open **Custom Builder**.
 2. Select `Oracle A - Test`.
@@ -710,7 +757,7 @@ ORDER_ITEMS
 CREATED_AT >= DATE '2026-01-01'
 ```
 
-7. Save the manifest.
+7. Save the table selection.
 
 ### Run and verify
 
@@ -736,21 +783,21 @@ Because O2P preserves Oracle identifier case with quotes, actual table names may
 
 ### UI
 
-**Job Runs** refreshes every 5 seconds and shows:
+**Runs** refreshes every 5 seconds and shows:
 
-- job ID, Application, target schema, and status;
+- job ID, Migration, target schema, and status;
 - Cancel and Retry actions where available.
 
-The current **Dashboard** displays static zero values and is not a migration-monitoring source. Use Job Runs and Job Details.
+The current **Dashboard** displays static zero values and is not a migration-monitoring source. Use Runs and Run Details.
 
-**Job Details** refreshes every 2 seconds and shows:
+**Run Details** refreshes every 2 seconds and shows:
 
-- total rows rolled up from completed chunks;
+- total rows rolled up from completed batches;
 - active rows/second;
-- active chunk count;
+- active batch count;
 - table status;
-- completed chunks and percentage;
-- chunk heatmap and error tooltips;
+- completed batches and percentage;
+- batch heatmap and error tooltips;
 - table error message;
 - source and target row-count validation.
 
@@ -773,7 +820,7 @@ API and Worker use Serilog:
 
 The full Compose stack is not turnkey, as described in section 3. If operators repair and use it, container file logs are not mounted by the current Compose file and should not be treated as durable. Add an operator-managed log sink or volume before production.
 
-Useful Worker messages include claimed chunks, successful row totals, timeouts, preparation failures, lease recovery, and validation failures.
+Useful Worker messages include claimed batches, successful row totals, timeouts, preparation failures, lease recovery, and validation failures.
 
 ### API
 
@@ -805,7 +852,7 @@ Validation results and metrics are stored in metadata and displayed by the UI/AP
 
 ### Worker does not process a Queued job
 
-- **Symptom:** Job remains `Queued`; no chunks appear.
+- **Symptom:** Job remains `Queued`; no batches appear.
 - **Cause:** Worker is stopped, uses a different metadata database, cannot connect to metadata, or cannot decrypt stored credentials.
 - **Diagnose:** Check Worker startup/logs and compare its metadata connection string with the API.
 - **Solution:** Start/restart Worker with the same metadata configuration and preserve the Data Protection keys.
@@ -813,13 +860,13 @@ Validation results and metrics are stored in metadata and displayed by the UI/AP
 ### Job remains Running after table preparation fails
 
 - **Symptom:** a table fails during Creating/Planning, but the parent job never reaches a terminal state.
-- **Cause:** the current preparation-failure path marks the table Failed but does not always run parent-job completion evaluation when no chunks were created.
-- **Diagnose:** inspect table status/error and confirm that the table has no chunk rows.
+- **Cause:** the current preparation-failure path marks the table Failed but does not always run parent-job completion evaluation when no batches were created.
+- **Diagnose:** inspect table status/error and confirm that the table has no batch rows.
 - **Solution:** correct the underlying issue, cancel the stuck job, and create a new full job. Do not assume the parent status will self-correct.
 
 ### Source connection refused or timed out
 
-- **Symptom:** Connection test, discovery, planning, or chunk fails with Oracle connection errors.
+- **Symptom:** Connection test, discovery, planning, or batch fails with Oracle connection errors.
 - **Cause:** Wrong host/port/service, listener/firewall issue, unavailable database, or exhausted Oracle sessions.
 - **Diagnose:** Test from both API and Worker hosts; inspect Oracle listener and session limits; check error codes.
 - **Solution:** Correct the profile/network and reduce `MaxOracleSessions`/`MaxChunkWorkers` if the source is constrained.
@@ -840,33 +887,33 @@ Planning and reading retry selected transient Oracle errors up to four attempts 
 - **Diagnose:** query `ALL_TABLES` and `ALL_TAB_COLUMNS` as `SOURCE_USER`.
 - **Solution:** correct the owner/table names and grants; rerun full or targeted discovery.
 
-### `NO COLUMNS` in the manifest
+### `NO COLUMNS` in the table selection
 
 - **Symptom:** selected table has no discovered columns; target DDL will be invalid.
 - **Cause:** column catalog access failed or stale/incomplete discovery data.
 - **Diagnose:** check discovery response/logs and `ALL_TAB_COLUMNS` access.
 - **Solution:** fix access and refresh discovery. Do not launch that table.
 
-### Preflight fails
+### Readiness check fails
 
 - **Symptom:** launch returns `Preflight check failed`.
 - **Cause:** Oracle connectivity/catalog query failure, PostgreSQL older than 14, missing schema privileges, absent schema, or failed probe DDL/DML.
-- **Diagnose:** read the returned preflight details and API logs.
+- **Diagnose:** read the returned readiness check details and API logs.
 - **Solution:** correct access, create the target schema, upgrade PostgreSQL, or use an appropriately privileged target account.
 
 ### Existing target schema/object mismatch
 
 - **Symptom:** binary COPY reports missing column, type mismatch, null violation, or wrong column count.
 - **Cause:** the table already exists and `CREATE TABLE IF NOT EXISTS` did not reconcile it.
-- **Diagnose:** compare the manifest with PostgreSQL `information_schema.columns`, including exact quoted names and order.
+- **Diagnose:** compare the table selection with PostgreSQL `information_schema.columns`, including exact quoted names and order.
 - **Solution:** back up and manually recreate/align the target table, then start a new full job.
 
 ### Data type conversion or binary format error
 
 - **Symptom:** Npgsql binary COPY error such as incompatible CLR/PostgreSQL type, overflow, invalid XML, or incorrect binary format.
 - **Cause:** source value is incompatible with the generated type; numeric precision exceeds the selected integer; unknown Oracle type fell back to text; unsupported provider value.
-- **Diagnose:** identify the failed table/chunk and inspect source type/value ranges.
-- **Solution:** adjust the target design/manifest through an approved API-level customization or preprocess the source. The current UI has no type-override control.
+- **Diagnose:** identify the failed table/batch and inspect source type/value ranges.
+- **Solution:** adjust the target design/table selection through an approved API-level customization or preprocess the source. The current UI has no type-override control.
 
 ### Nullability violation
 
@@ -884,9 +931,9 @@ Planning and reading retry selected transient Oracle errors up to four attempts 
 
 O2P snapshots and temporarily drops local PK, UNIQUE, FK, CHECK constraints and inbound FKs. It does not snapshot/drop standalone indexes or triggers.
 
-### Chunk timeout
+### Batch timeout
 
-- **Symptom:** chunk fails with `Chunk timed out ... stall watchdog`.
+- **Symptom:** batch fails with `Chunk timed out ... stall watchdog`.
 - **Cause:** slow Oracle query, LOB transfer, blocked PostgreSQL, network delay, or too-short timeout.
 - **Diagnose:** inspect Oracle/PostgreSQL activity and Worker logs.
 - **Solution:** remove the bottleneck, lower concurrency, or increase `Concurrency__ChunkTimeoutMinutes`, then use the safe recovery procedure in section 11.
@@ -904,25 +951,25 @@ Oracle commands also use a 600-second command timeout; PostgreSQL writer command
 
 - **Symptom:** table is `CompletedWithErrors`.
 - **Cause:** partial/missing target rows, concurrent source changes, trigger effects, retry inconsistency, wrong existing schema, or filter/value behavior.
-- **Diagnose:** compare filtered Oracle count with quoted PostgreSQL count and inspect all chunk statuses.
+- **Diagnose:** compare filtered Oracle count with quoted PostgreSQL count and inspect all batch statuses.
 - **Solution:** freeze or reconcile source changes, repair the target, and run a new full job.
 
 ### “Batch/parameter limit” concerns
 
-O2P does not build multi-row parameterized INSERT batches. It streams rows through a bounded channel into binary COPY, so conventional SQL parameter-count limits do not apply. Memory or transaction pressure is controlled primarily by chunk size/strategy, row width, LOB behavior, concurrency, and the 1,000-row channel.
+O2P does not build multi-row parameterized INSERT batches. It streams rows through a bounded channel into binary COPY, so conventional SQL parameter-count limits do not apply. Memory or transaction pressure is controlled primarily by batch size/strategy, row width, LOB behavior, concurrency, and the 1,000-row channel.
 
 ## 10. Data Validation
 
 ### Built-in validation
 
-After all chunks for a table are done, O2P:
+After all batches for a table are done, O2P:
 
-1. counts rows in the Oracle source table using the manifest filter, if present;
+1. counts rows in the Oracle source table using the table selection filter, if present;
 2. counts all rows in the target table;
 3. stores both values;
 4. marks validation passed only when counts match.
 
-Results appear under **Post-Migration Verification** on Job Details.
+Results appear under **Post-Migration Verification** on Run Details.
 
 This is row-count validation only. Equal counts do not prove equal values.
 
@@ -930,7 +977,7 @@ This is row-count validation only. Equal counts do not prove equal values.
 
 1. Confirm job `Completed`, not `CompletedWithErrors`.
 2. Confirm every table `Completed`.
-3. Confirm every chunk is `Done`.
+3. Confirm every batch is `Done`.
 4. Confirm every built-in row-count result passes.
 5. Run independent source counts:
 
@@ -938,7 +985,7 @@ This is row-count validation only. Equal counts do not prove equal values.
 SELECT COUNT(*) FROM SOURCE_OWNER.SOURCE_TABLE;
 ```
 
-For filtered tables, apply the exact manifest predicate.
+For filtered tables, apply the exact table selection predicate.
 
 6. Run target counts with exact quoted names:
 
@@ -948,57 +995,57 @@ SELECT COUNT(*) FROM target_schema."SOURCE_TABLE";
 
 7. Sample deterministic business keys and important fields on both sides.
 8. Check nulls, numeric totals, date boundaries, maximum string lengths, and LOB sizes using DBA-approved SQL.
-9. Run application-level reports or read-only smoke tests against the target.
+9. Run migration-level reports or read-only smoke tests against the target.
 10. Preserve job details, validation results, and logs as migration evidence.
 
-There is no built-in failed-record report because the current COPY transaction fails the whole chunk rather than recording individual rejected rows.
+There is no built-in failed-record report because the current COPY transaction fails the whole batch rather than recording individual rejected rows.
 
 ### Concurrent-source warning
 
-O2P does not establish one database-wide Oracle snapshot across all chunks and tables. If source rows are inserted, updated, or deleted during migration, chunks and final row counts can observe different points in time. Plan an application freeze or another source-consistency strategy before cutover.
+O2P does not establish one database-wide Oracle snapshot across all batches and tables. If source rows are inserted, updated, or deleted during migration, batches and final row counts can observe different points in time. Plan a migration freeze or another source-consistency strategy before cutover.
 
 ## 11. Re-running / Resuming Migration
 
 ### Worker interruption
 
-Each chunk is claimed in metadata with:
+Each batch is claimed in metadata with:
 
 - a Worker ID;
 - a 10-minute lease;
 - a heartbeat every 4 minutes;
 - an attempt count.
 
-Expired leases are returned to `Pending`. When a Worker starts, it also requeues **all** metadata chunks left in `Running`, without checking lease owner or expiry. Run only one Worker process; starting another Worker can cause active work to be requeued.
+Expired leases are returned to `Pending`. When a Worker starts, it also requeues **all** metadata batches left in `Running`, without checking lease owner or expiry. Run only one Worker process; starting another Worker can cause active work to be requeued.
 
-The target writes one chunk in a PostgreSQL transaction that includes a marker in:
+The target writes one batch in a PostgreSQL transaction that includes a marker in:
 
 ```text
 <target-schema>._o2p_chunk_log
 ```
 
-The marker key is `(job_run_id, table_run_id, chunk_index)`. If a committed chunk is retried, the duplicate marker prevents a second COPY, reducing duplicate-row risk after a Worker/metadata failure.
+The marker key is `(job_run_id, table_run_id, chunk_index)`. If a committed batch is retried, the duplicate marker prevents a second COPY, reducing duplicate-row risk after a Worker/metadata failure.
 
 ### Pause and resume
 
-- **Pause:** job becomes `Paused`; no new chunks match the claim query. Already running chunks are allowed to finish.
-- **Resume:** job returns to `Running`; pending chunks can be claimed.
+- **Pause:** job becomes `Paused`; no new batches match the claim query. Already running batches are allowed to finish.
+- **Resume:** job returns to `Running`; pending batches can be claimed.
 
 This is the normal safe continuation mechanism for an intentionally paused, otherwise healthy job.
 
 ### Cancel
 
-Cancel marks the job, active tables, and pending/running chunks as cancelled and attempts to restore constraints. Target tables are not dropped. Cancellation may truncate partially loaded target tables as part of constraint restoration.
+Cancel marks the job, active tables, and pending/running batches as cancelled and attempts to restore constraints. Target tables are not dropped. Cancellation may truncate partially loaded target tables as part of constraint restoration.
 
-Cancellation changes metadata but does not signal the cancellation token of an already executing Oracle read/PostgreSQL COPY. An active chunk can continue and commit target rows after cancellation was requested, even though its final metadata update will not mark the cancelled chunk Done. Treat a cancelled target as indeterminate and perform a fresh full job after inspection.
+Cancellation changes metadata but does not signal the cancellation token of an already executing Oracle read/PostgreSQL COPY. An active batch can continue and commit target rows after cancellation was requested, even though its final metadata update will not mark the cancelled batch Done. Treat a cancelled target as indeterminate and perform a fresh full job after inspection.
 
 ### Retry failed: current limitation
 
-The UI/API can requeue failed or cancelled chunks and failed/cancelled tables. However, when any chunk fails, the current failure path truncates the target table before restoring constraints. `retry_failed` then requeues failed chunks but does not requeue chunks already marked `Done`.
+The UI/API can requeue failed or cancelled batches and failed/cancelled tables. However, when any batch fails, the current failure path truncates the target table before restoring constraints. `retry_failed` then requeues failed batches but does not requeue batches already marked `Done`.
 
 Consequences:
 
-- previously successful chunk rows may have been removed by the truncate;
-- retrying only failed chunks can leave the target incomplete;
+- previously successful batch rows may have been removed by the truncate;
+- retrying only failed batches can leave the target incomplete;
 - row-count validation should detect the mismatch, but Retry is not a reliable full recovery mechanism for partial table failure.
 
 **Recommended recovery after a partial failure**
@@ -1007,7 +1054,7 @@ Consequences:
 2. Record the job and error details.
 3. Verify constraints were restored.
 4. Correct the source, target, network, permission, or type issue.
-5. Create and launch a **new job** from the same reviewed manifest.
+5. Create and launch a **new job** from the same reviewed table selection.
 6. Allow the new job to truncate and reload the whole selected target table set.
 7. Re-run all validation.
 
@@ -1015,7 +1062,7 @@ Consequences:
 
 A new job reuses the same source table names on the target. Existing destination tables are truncated and reloaded; they are not appended to. This avoids normal duplicate accumulation but overwrites existing target data.
 
-The target chunk fence is per job/table-run/chunk, so it does not cause a new job to skip old rows.
+The target batch fence is per job/table-run/batch, so it does not cause a new job to skip old rows.
 
 ### Precautions
 
@@ -1032,7 +1079,7 @@ The target chunk fence is per job/table-run/chunk, so it does not cause a new jo
 
 - Back up the target database and test restore procedures.
 - Test with Oracle Test → Postgres Test first.
-- Rehearse the exact manifest, target schema, permissions, and validation plan.
+- Rehearse the exact table selection, target schema, permissions, and validation plan.
 - Review every existing target table because it will be truncated.
 - Confirm disk for target data, indexes, WAL, temporary work, backups, and metadata.
 - Confirm stable low-latency connectivity from every Worker host.
@@ -1042,7 +1089,7 @@ The target chunk fence is per job/table-run/chunk, so it does not cause a new jo
 
 ### Source consistency and downtime
 
-The tool is a bulk snapshot copy, not CDC. It does not capture changes made after a chunk is read. For a consistent cutover, arrange an application write freeze, a DBA-managed source-consistency mechanism, or a separate reconciliation process. O2P itself does not schedule downtime or delta sync.
+The tool is a bulk snapshot copy, not CDC. It does not capture changes made after a batch is read. For a consistent cutover, arrange a migration write freeze, a DBA-managed source-consistency mechanism, or a separate reconciliation process. O2P itself does not schedule downtime or delta sync.
 
 ### Load tuning
 
@@ -1065,9 +1112,9 @@ The fixed 50,000-row/second limiter is row-based, not byte-based. Wide rows and 
 ### Large and LOB-heavy tables
 
 - LOB tables use smaller Oracle fetch buffers and limited initial LOB prefetch.
-- Each chunk is one target transaction; ensure WAL and storage can accommodate it.
+- Each batch is one target transaction; ensure WAL and storage can accommodate it.
 - ROWID-hash fallback performs multiple full source-table scans—up to the hard-coded 16 buckets—and can be expensive.
-- Tables falling back to one chunk cannot use parallel chunk workers for that table.
+- Tables falling back to one batch cannot use parallel batch workers for that table.
 - Increase timeout only after diagnosing whether the operation is progressing.
 
 ### Target constraints and dependencies
@@ -1085,7 +1132,7 @@ New target tables do not receive source PKs, indexes, foreign keys, sequences, o
 - Limit Admin access.
 - Rotate the bootstrap password immediately.
 - Back up and protect metadata/Data Protection keys.
-- Do not put secrets in source-controlled JSON, shell history, logs, manifests, or screenshots.
+- Do not put secrets in source-controlled JSON, shell history, logs, table selections, or screenshots.
 
 Current hardening limitations must be resolved before exposure:
 
@@ -1101,7 +1148,7 @@ Current hardening limitations must be resolved before exposure:
 - Persist and centralize logs.
 - Alert when jobs remain Queued/Running without progress.
 - Do not depend on the Settings UI for runtime tuning.
-- Validate Kubernetes manifests and environment names before deployment.
+- Validate Kubernetes table selections and environment names before deployment.
 - Run a representative performance test and a failure/restart rehearsal.
 - Obtain business and DBA sign-off on row counts and data samples before cutover.
 
@@ -1117,11 +1164,11 @@ Not without correcting its API container port and UI-to-API routing. The verifie
 
 ### Can I run multiple Workers for higher throughput?
 
-No. Current table preparation and startup chunk recovery are not multi-node safe. Run exactly one Worker and tune its process-local concurrency settings.
+No. Current table preparation and startup batch recovery are not multi-node safe. Run exactly one Worker and tune its process-local concurrency settings.
 
 ### Does it migrate an entire Oracle database automatically?
 
-No. It discovers tables for a selected owner and migrates only tables included in a saved manifest.
+No. It discovers tables for a selected owner and migrates only tables included in a saved table selection.
 
 ### Can I migrate only selected rows?
 
@@ -1129,15 +1176,15 @@ Yes. Enter an Oracle predicate in a table's Filter field. The same filter is use
 
 ### Can I migrate only selected columns?
 
-The backend model supports an exclusion flag, but the current UI does not expose column selection. Normal UI-generated manifests include every discovered column.
+The backend model supports an exclusion flag, but the current UI does not expose column selection. Normal UI-generated table selections include every discovered column.
 
 ### Can I change a generated data type?
 
-Not through the current UI. Review type compatibility before production; an API-level manifest edit would require careful operator validation.
+Not through the current UI. Review type compatibility before production; an API-level table selection edit would require careful operator validation.
 
 ### Is there a batch-size setting?
 
-No. Data streams through a 1,000-row bounded channel into one binary COPY transaction per chunk.
+No. Data streams through a 1,000-row bounded channel into one binary COPY transaction per batch.
 
 ### Does the Settings page tune active migrations?
 
@@ -1157,11 +1204,11 @@ No. New target tables contain columns and nullability only. Existing PostgreSQL 
 
 ### Are retries duplicate-safe?
 
-The transactional target chunk fence reduces duplicate-row risk for committed chunks retried within the same job. Nevertheless, the current partial-failure recovery can truncate successful chunk rows, so use a new full job after a partial table failure.
+The transactional target batch fence reduces duplicate-row risk for committed batches retried within the same job. Nevertheless, the current partial-failure recovery can truncate successful batch rows, so use a new full job after a partial table failure.
 
 ### Can I pause without losing completed work?
 
-Yes. Pause stops new claims while current chunks finish; Resume continues pending chunks.
+Yes. Pause stops new claims while current batches finish; Resume continues pending batches.
 
 ### Why is transferred MB always zero?
 
@@ -1177,7 +1224,7 @@ It can, but O2P does not provide a database-wide consistent snapshot or CDC. Cha
 
 ### Why can I not launch the Live target from the UI?
 
-The current UI and API confirmation phrases are inconsistent, and the UI does not pass the phrase to the launch call. Use the Development Swagger/API with the exact server-required phrase until the application code is corrected.
+The current UI and API confirmation phrases are inconsistent, and the UI does not pass the phrase to the launch call. Use the Development Swagger/API with the exact server-required phrase until the migration code is corrected.
 
 ### Where are passwords stored?
 
@@ -1185,4 +1232,4 @@ Database passwords are encrypted in the metadata PostgreSQL database using ASP.N
 
 ### Where do I investigate a failed migration?
 
-Start with Job Details, expand the failed table, inspect chunk tooltips, then review `o2p-worker-*.log`, `o2p-api-*.log`, and the Oracle/PostgreSQL server logs.
+Start with Run Details, expand the failed table, inspect batch tooltips, then review `o2p-worker-*.log`, `o2p-api-*.log`, and the Oracle/PostgreSQL server logs.

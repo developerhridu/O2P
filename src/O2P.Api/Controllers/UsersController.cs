@@ -13,7 +13,7 @@ namespace O2P.Api.Controllers
 {
     [ApiController]
     [Route("api/v1/[controller]")]
-    //[Authorize(Roles = "Admin")]
+    [Authorize(Roles = "Admin")]
     public class UsersController : ControllerBase
     {
         private static readonly string[] SupportedRoles = { "Admin", "Operator", "Viewer" };

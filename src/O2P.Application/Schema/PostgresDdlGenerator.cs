@@ -9,7 +9,11 @@ namespace O2P.Application.Schema
         public static string GenerateTableDdl(ManifestTable table, string targetSchema, string targetTableName)
         {
             var sb = new StringBuilder();
-            sb.AppendLine($"CREATE TABLE IF NOT EXISTS {SqlIdentifier.QuotePostgresQualified(targetSchema, targetTableName)} (");
+            // No IF NOT EXISTS: this only runs once the engine has observed the table to be absent,
+            // so the clause could only mask a race with a concurrent job, or the name resolving to a
+            // view or foreign table (TableExistsAsync filters relkind to 'r'/'p'). Either should fail
+            // that one table loudly with 42P07; a retry then takes the reuse path and gets checked.
+            sb.AppendLine($"CREATE TABLE {SqlIdentifier.QuotePostgresQualified(targetSchema, targetTableName)} (");
 
             var includedColumns = table.Columns.Where(c => !c.IsExcluded).ToList();
             

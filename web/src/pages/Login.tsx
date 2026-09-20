@@ -49,7 +49,7 @@ export default function Login() {
       const message = err?.message || (changeMode ? 'Password change failed' : 'Sign in failed');
       setError(
         message === 'Failed to fetch'
-          ? 'Cannot reach the API. Check that O2P.Api is running and try again.'
+          ? 'Cannot reach the server. Check that it is running and try again.'
           : message
       );
     } finally {
@@ -66,7 +66,7 @@ export default function Login() {
         <div className="relative">
           <div className="text-center mb-8">
             <h2 className="text-3xl font-bold bg-gradient-to-r from-blue-400 to-indigo-400 bg-clip-text text-transparent">O2P Migration Studio</h2>
-            <p className="text-slate-400 mt-2">{changeMode ? 'Change your password' : 'Sign in to manage migrations'}</p>
+            <p className="text-slate-400 mt-2">{changeMode ? 'Change your password' : 'Sign in to manage your migrations'}</p>
           </div>
 
           <form className="space-y-6" onSubmit={submit}>

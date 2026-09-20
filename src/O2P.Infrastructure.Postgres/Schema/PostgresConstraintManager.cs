@@ -204,25 +204,12 @@ ORDER BY rn.nspname, rt.relname, c.conname;";
             await ExecuteNonQueryAsync(conn, sql, cancellationToken);
         }
 
+        // Shared with PostgresSchemaInspector so the mock short-circuit is defined once.
         private static bool IsMock(Connection connection) =>
-            connection.Host.Equals("mock", StringComparison.OrdinalIgnoreCase);
+            PostgresConnectionFactory.IsMock(connection);
 
-        private static async Task<NpgsqlConnection> OpenAsync(Connection connection, string password, CancellationToken cancellationToken)
-        {
-            var csb = new NpgsqlConnectionStringBuilder
-            {
-                Host = connection.Host,
-                Port = connection.Port,
-                Database = connection.ServiceOrDb,
-                Username = connection.Username,
-                Password = password,
-                Pooling = false
-            };
-
-            var conn = new NpgsqlConnection(csb.ConnectionString);
-            await conn.OpenAsync(cancellationToken);
-            return conn;
-        }
+        private static Task<NpgsqlConnection> OpenAsync(Connection connection, string password, CancellationToken cancellationToken) =>
+            PostgresConnectionFactory.OpenAsync(connection, password, cancellationToken);
 
         private static async Task ExecuteNonQueryAsync(NpgsqlConnection conn, string sql, CancellationToken cancellationToken)
         {
