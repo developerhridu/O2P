@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { Activity, RefreshCw, Power, Ban, RotateCcw } from 'lucide-react';
-import { fetchJobs, cancelAllAndRestartWorker, commandJob, hasRole } from '../api';
+import { Activity, RefreshCw, Power, Ban, RotateCcw, Trash2 } from 'lucide-react';
+import { fetchJobs, cancelAllAndRestartWorker, commandJob, deleteJob, hasRole } from '../api';
 import { commandLabel, statusColor, statusLabel } from '../labels';
 import { useWorkerStatus } from '../useWorkerStatus';
 import { WorkerBanner, WorkerChip } from '../components/WorkerStatus';
@@ -58,6 +58,22 @@ export default function JobRuns() {
       await loadJobs();
     } catch (err: any) {
       alert(err.message || `Couldn't ${commandLabel(command)}.`);
+    } finally {
+      setBusyJobId(null);
+    }
+  };
+
+  const removeRun = async (jobId: number) => {
+    if (!window.confirm(
+      `Delete run #${jobId}?\n\nIts history (tables, batches, checks and events) is removed for good. ` +
+      'Data already copied to the destination is not touched.'
+    )) return;
+    setBusyJobId(jobId);
+    try {
+      await deleteJob(jobId);
+      await loadJobs();
+    } catch (err: any) {
+      alert(err.message || "Couldn't delete the run.");
     } finally {
       setBusyJobId(null);
     }
@@ -192,6 +208,20 @@ export default function JobRuns() {
                   <Link to={`/jobs/${job.id}`} className="btn btn-secondary" style={{ padding: '6px 12px', fontSize: '0.85rem' }}>
                     View details
                   </Link>
+
+                  {canControl && !canCancel && (
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      disabled={busy}
+                      onClick={() => removeRun(job.id)}
+                      title="Remove this run and its history"
+                      style={{ padding: '6px 10px', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '4px', color: '#f87171', borderColor: 'rgba(248,113,113,0.4)' }}
+                    >
+                      <Trash2 size={14} />
+                      Delete
+                    </button>
+                  )}
                 </div>
               </div>
             );

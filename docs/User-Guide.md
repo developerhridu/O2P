@@ -861,10 +861,22 @@ Validation results and metrics are stored in metadata and displayed by the UI/AP
 
 ### Worker does not process a Queued job
 
-- **Symptom:** Job remains `Queued`; no batches appear.
+- **Symptom:** Job remains `Queued` (shown as **Waiting**); no batches appear.
 - **Cause:** Worker is stopped, uses a different metadata database, cannot connect to metadata, or cannot decrypt stored credentials.
-- **Diagnose:** Check Worker startup/logs and compare its metadata connection string with the API.
-- **Solution:** Start/restart Worker with the same metadata configuration and preserve the Data Protection keys.
+- **Diagnose:** The **Runs** page shows a red **Copier not running** chip and a banner when no Worker has reported in for 45 seconds. The same answer is available from `GET /api/v1/workers/status` (`running`, `count`, `multiple`, and each Worker's host, process id and last-seen time). Then check Worker startup/logs and compare its metadata connection string with the API.
+- **Solution:** Start/restart Worker with the same metadata configuration and preserve the Data Protection keys. In development run `dotnet run --project src/O2P.Worker`; on a server run `scripts/run-worker.ps1`. Waiting runs then start on their own. A run that has not started can still be cancelled while the Worker is down; the cancel takes effect immediately.
+
+### Copier status shows "N copiers running"
+
+- **Symptom:** amber chip and banner on the **Runs** page.
+- **Cause:** more than one Worker process is registered against the same metadata database. A newly starting Worker requeues batches that another live Worker is copying.
+- **Solution:** stop the extra Worker so exactly one remains. Each Worker writes a heartbeat every 10 seconds (`o2p.worker_heartbeats`) and removes it when it stops cleanly; one that is killed is treated as gone after 45 seconds.
+
+### A run is refused, or ends at once, with "no tables ticked"
+
+- **Symptom:** starting a run fails with `This table selection has no tables ticked…`, or a run appears as **Failed** with no tables and the message `No tables were selected for this run`.
+- **Cause:** the table selection has no ticked tables, so there is nothing to copy. New runs are refused up front; a run like this that was created earlier is failed by the Worker instead of waiting forever.
+- **Solution:** open the table selection, tick at least one table, save, and start the run again.
 
 ### Job remains Running after table preparation fails
 
@@ -1043,9 +1055,20 @@ This is the normal safe continuation mechanism for an intentionally paused, othe
 
 ### Cancel
 
+A run that is still **Waiting** (`Queued`) is cancelled immediately by the API, even when no Worker is running: the run and its tables become Cancelled and the cancel command is recorded as already handled. For a run that has started, the Worker handles the cancel as described below.
+
 Cancel marks the job, active tables, and pending/running batches as cancelled and attempts to restore constraints. Target tables are not dropped. Cancellation may truncate partially loaded target tables as part of constraint restoration.
 
 Cancellation changes metadata but does not signal the cancellation token of an already executing Oracle read/PostgreSQL COPY. An active batch can continue and commit target rows after cancellation was requested, even though its final metadata update will not mark the cancelled batch Done. Treat a cancelled target as indeterminate and perform a fresh full job after inspection.
+
+### Delete a run
+
+`DELETE /api/v1/jobs/{id}` (Admin or Operator; also the **Delete** button on the Runs list and **Delete run** on the run page) removes a run together with its tables, batches, checks, rejected rows, events, logs and progress graphs. It does not touch data already copied to the destination.
+
+- Allowed for runs that are Draft, Completed, Completed with errors, Failed or Cancelled.
+- A Waiting, Running or Paused run answers `409`: cancel it first, then delete it.
+- A cancelled run whose last batch is still finishing also answers `409`; try again in a few seconds.
+- Deleting is permanent. To keep a record, note the run's results before deleting it.
 
 ### Retry failed: current limitation
 

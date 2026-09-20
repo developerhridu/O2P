@@ -292,6 +292,46 @@ namespace O2P.Api.Controllers
             return Accepted();
         }
 
+        // Removes a run and its history (tables, batches, checks, events, logs, graphs). Only runs that are
+        // not in progress can go: a waiting, running or paused run must be cancelled first, otherwise the
+        // Worker could be writing to rows that vanish underneath it. Destination tables are never touched.
+        [Authorize(Roles = "Admin,Operator")]
+        [HttpDelete("{id}")]
+        public async Task<IActionResult> DeleteJob(long id)
+        {
+            var job = await _db.JobRuns.AsNoTracking().Where(j => j.Id == id).Select(j => new { j.Id, j.Status }).FirstOrDefaultAsync();
+            if (job == null) return NotFound();
+
+            string[] deletable = { "Draft", "Completed", "CompletedWithErrors", "Failed", "Cancelled" };
+            if (!deletable.Contains(job.Status))
+            {
+                return Conflict("This run is still waiting, running or paused. Cancel it first, then delete it.");
+            }
+
+            // A run that was cancelled while a batch was mid-copy can still have that batch working for a
+            // moment. Wait until nothing in it is active so the Worker's final update does not hit a missing row.
+            var stillBusy = await _db.ChunkLogs.AnyAsync(c => c.TableRun.JobRunId == id && c.Status == "Running");
+            if (stillBusy)
+            {
+                return Conflict("A batch of this run is still finishing. Try again in a few seconds.");
+            }
+
+            // Rows without a cascading link to the run (rejected rows, events, logs) and the optional graph
+            // link to a table run are removed explicitly, dependants first, all or nothing.
+            await using var tx = await _db.Database.BeginTransactionAsync();
+            await _db.RowRejects
+                .Where(r => _db.TableRuns.Any(t => t.Id == r.TableRunId && t.JobRunId == id))
+                .ExecuteDeleteAsync();
+            await _db.MetricSamples.Where(m => m.JobRunId == id).ExecuteDeleteAsync();
+            await _db.RunEvents.Where(e => e.JobRunId == id).ExecuteDeleteAsync();
+            await _db.RunLogs.Where(l => l.JobRunId == id).ExecuteDeleteAsync();
+            await _db.JobCommands.Where(c => c.JobRunId == id).ExecuteDeleteAsync();
+            await _db.JobRuns.Where(j => j.Id == id).ExecuteDeleteAsync(); // tables, batches and checks cascade
+            await tx.CommitAsync();
+
+            return NoContent();
+        }
+
         // Admin "big red button" for the Job Runs page: cancel every non-terminal job at once and
         // ask the Worker(s) to restart. Only metadata status is changed - target tables are untouched.
         [Authorize(Roles = "Admin")]

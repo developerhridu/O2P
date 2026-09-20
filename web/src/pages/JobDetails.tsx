@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft,
+  Trash2,
   RefreshCw,
   CheckCircle2,
   AlertCircle,
@@ -12,7 +13,7 @@ import {
   Pause,
   Play
 } from 'lucide-react';
-import { commandJob, fetchJob, fetchMetrics, fetchValidation, hasRole } from '../api';
+import { commandJob, deleteJob, fetchJob, fetchMetrics, fetchValidation, hasRole } from '../api';
 import { commandLabel, statusColor, statusLabel } from '../labels';
 import { useWorkerStatus } from '../useWorkerStatus';
 import { WorkerBanner } from '../components/WorkerStatus';
@@ -21,6 +22,7 @@ export default function JobDetails() {
   const { id } = useParams();
   const jobId = Number(id);
   const worker = useWorkerStatus();
+  const navigate = useNavigate();
 
   const [job, setJob] = useState<any>(null);
   const [metrics, setMetrics] = useState<any[]>([]);
@@ -98,6 +100,22 @@ export default function JobDetails() {
     }
   };
 
+  const removeRun = async () => {
+    if (!window.confirm(
+      `Delete run #${jobId}?\n\nIts history (tables, batches, checks and events) is removed for good. ` +
+      'Data already copied to the destination is not touched.'
+    )) return;
+    setActionBusy('delete');
+    setActionMsg(null);
+    try {
+      await deleteJob(jobId);
+      navigate('/jobs');
+    } catch (err: any) {
+      setActionMsg(err.message || "Couldn't delete the run.");
+      setActionBusy(null);
+    }
+  };
+
   if (loading) {
     return <div className="card" style={{ textAlign: 'center', padding: '48px' }}><RefreshCw size={24} className="spin" /></div>;
   }
@@ -120,6 +138,7 @@ export default function JobDetails() {
 
   const status = job.status as string;
   const canCancel = ['Running', 'Queued', 'Paused'].includes(status);
+  const canDelete = !canCancel;
   const canPause = status === 'Running';
   const canResume = status === 'Paused';
   const canRetry = ['Failed', 'Cancelled', 'CompletedWithErrors'].includes(status)
@@ -205,6 +224,19 @@ export default function JobDetails() {
               >
                 <Ban size={15} />
                 {actionBusy === 'cancel' ? '…' : 'Cancel run'}
+              </button>
+            )}
+            {canControl && canDelete && (
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={!!actionBusy}
+                onClick={removeRun}
+                title="Remove this run and its history"
+                style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.85rem', color: '#f87171', borderColor: 'rgba(248,113,113,0.4)' }}
+              >
+                <Trash2 size={15} />
+                {actionBusy === 'delete' ? '…' : 'Delete run'}
               </button>
             )}
           </div>

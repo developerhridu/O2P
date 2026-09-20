@@ -281,8 +281,12 @@ await scroller.evaluate((el) => { el.scrollLeft = 0; });
 // ---- save round trip ----------------------------------------------------------------------
 section('save round trip');
 await page.getByRole('button', { name: /save selection/i }).click();
-await page.waitForTimeout(3000);
-r = await api('GET', `/api/v1/manifests/${manifestId}`);
+// Saving thousands of rows can take a few seconds: wait for the row filter to land rather than sleeping a fixed time.
+for (let i = 0; i < 40; i++) {
+  await page.waitForTimeout(500);
+  r = await api('GET', `/api/v1/manifests/${manifestId}`);
+  if ((r.data?.tables ?? []).find((t) => t.tableName === 'T_0001')?.whereClause) break;
+}
 const saved = r.data?.tables ?? [];
 const t1 = saved.find((t) => t.tableName === 'T_0001');
 check(saved.length === TABLE_COUNT, `all ${TABLE_COUNT} tables saved (${saved.length})`);

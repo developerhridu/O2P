@@ -500,6 +500,16 @@ Until this is fixed, do Live runs like this: click **Start run** once (this crea
 
 **Runs — Monitor active and historical migration executions.** The list refreshes every **5 seconds**.
 
+Under the subtitle, a chip shows whether the copier (the Worker program) is alive:
+
+| Chip | Meaning |
+|---|---|
+| Green **Copier running** | Exactly one copier has reported in within the last 45 seconds |
+| Red **Copier not running** | None has. Waiting runs will not start until it is started |
+| Amber **N copiers running** | More than one. Stop the extra one |
+
+When the copier is not running and runs are waiting, a red banner says how many runs are affected. You can still cancel a run that has not started; it is cancelled at once. Hover the chip to see each copier's host and process id.
+
 Each row: `Run #<id>`, `App: <name> • Target Schema: <schema>`, a status pill, and buttons:
 
 | Button | Shown when | Effect |
@@ -507,6 +517,7 @@ Each row: `Run #<id>`, `App: <name> • Target Schema: <schema>`, a status pill,
 | **View Details** | Always | Opens Run Details |
 | **Cancel** | Running, Queued or Paused (Admin/Operator) | `Cancel job #N? Target tables are not dropped.` |
 | **Retry** | Failed, Cancelled or CompletedWithErrors (Admin/Operator) | Re-queues failed work — read [Step 8](#12-step-8--fix-problems-and-re-run) first |
+| **Delete** | Any run that is not Waiting, Running or Paused: Draft, Completed, Completed with errors, Failed or Cancelled (Admin/Operator) | Asks first, then removes the run and its history (tables, batches, checks, rejected rows, events, logs). Data already copied to the destination is not touched. A run in progress must be cancelled first. The run page has the same **Delete run** button |
 
 Admin also has **Cancel All & Restart Copier**: cancels every running/queued/paused job and restarts the Worker. Use only when the Worker seems stuck; target tables are not dropped.
 

@@ -404,6 +404,14 @@ export async function commandJob(id: number, command: string, payload?: string) 
   }
 }
 
+/** Removes a finished (or never-started) run and its history. A waiting/running/paused run must be cancelled first. */
+export async function deleteJob(id: number) {
+  const res = await apiFetch(`${API_BASE}/jobs/${id}`, { method: 'DELETE', headers: getHeaders() });
+  if (!res.ok) {
+    throw new Error(await readErrorMessage(res, 'Could not delete the run.'));
+  }
+}
+
 // Admin: cancel every non-terminal job at once and signal the Worker(s) to restart.
 export async function cancelAllAndRestartWorker() {
   const res = await apiFetch(`${API_BASE}/jobs/cancel-all-and-restart-worker`, {

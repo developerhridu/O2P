@@ -148,6 +148,8 @@ const getJob = async (id) => (await api('GET', `/api/v1/jobs/${id}`)).data;
 
 // ============================================================================================
 section('phase 1 - no Worker running');
+// Scratch database only: drop rows left by a previously killed Worker so this run starts from a known state.
+psql('DELETE FROM o2p.worker_heartbeats;');
 check(psql('SELECT count(*) FROM o2p.worker_heartbeats;') === '0', 'starting with no Worker registered');
 
 let s = await status();
@@ -241,7 +243,7 @@ check(true, 'the failed empty run explains itself on its own page');
 
 // ============================================================================================
 section('phase 3 - a second Worker');
-const second = startWorker();
+startWorker();
 const two = await waitFor(async () => (await status())?.count === 2, 30000, 1000);
 check(!!two, 'a second Worker is detected');
 s = await status();
@@ -253,26 +255,28 @@ await warn.waitFor({ timeout: 15000 });
 check(/2 copiers are running/i.test(await warn.innerText()), 'the Runs page warns that two copiers are running');
 await page.screenshot({ path: path.join(OUT, '03-two-workers.png') });
 
-// Stop it the polite way (Ctrl+C-equivalent close request), not a hard kill: a Worker that stops
-// cleanly should say so at once rather than leave the screen to wait out the staleness window.
+// Stop both the way the product itself does: the "Restart Copier" signal, which makes every Worker
+// shut down cleanly. A Worker that stops cleanly should remove its own heartbeat at once, rather than
+// leave the screen to wait out the 45s staleness window. (Not taskkill: that sends a close signal to
+// every process sharing the console, including the API.)
 const t0 = Date.now();
-try { execFileSync('taskkill', ['/PID', String(second.pid)], { stdio: 'ignore' }); } catch { /* fall through to the kill below */ }
-const oneLeft = await waitFor(async () => (await status())?.count === 1, 20000, 500);
+psql(`INSERT INTO o2p.worker_control ("Id","RestartRequestedAt") VALUES (1, now()) ON CONFLICT ("Id") DO UPDATE SET "RestartRequestedAt" = now();`);
+const allGone = await waitFor(async () => (await status())?.count === 0, 30000, 500);
 const took = ((Date.now() - t0) / 1000).toFixed(1);
-if (oneLeft) {
-  check(true, `a Worker that is asked to stop removes itself promptly (${took}s, not the 45s staleness window)`);
-} else {
-  bad('a Worker that is asked to stop did not remove itself within 20s');
-  try { second.kill(); } catch { /* ignore */ }
-}
+check(!!allGone && Number(took) < 40, `Workers that are asked to stop remove their own heartbeat promptly (${took}s, well inside the 45s staleness window)`);
+check(psql('SELECT count(*) FROM o2p.worker_heartbeats;') === '0', 'leaving no rows behind');
 
 // ============================================================================================
 section('phase 4 - a Worker dies without warning');
 // A hard kill cannot clean up after itself, so this is caught by the staleness window instead.
-const first = workers[0];
+// Started after the restart signal above, so it does not obey it.
+await sleep(1500);
+const survivor = startWorker();
+const back = await waitFor(async () => (await status())?.running === true, 30000, 1000);
+check(!!back, 'a fresh Worker registers again');
 const killedAt = Date.now();
-first.kill();
-check(true, 'killed the remaining Worker outright (no chance to say goodbye)');
+survivor.kill();
+check(true, 'killed it outright (no chance to say goodbye)');
 const stillThere = (await status())?.running;
 const gone = await waitFor(async () => (await status())?.running === false, 75000, 2000);
 const goneAfter = ((Date.now() - killedAt) / 1000).toFixed(0);
