@@ -357,8 +357,10 @@
 }
 
 .tb-grid {
-  --tb-cols: 44px 150px minmax(240px, 1fr) 120px 110px 110px minmax(200px, 250px) 56px;
-  min-width: 940px;
+  /* checkbox | schema | table | rows | size | large objects | row filter | remove
+     "Large objects" needs ~135px: it is upper-cased with letter-spacing in the header. */
+  --tb-cols: 44px 150px minmax(240px, 1fr) 130px 100px 140px minmax(200px, 250px) 56px;
+  min-width: 980px;
   position: relative;
 }
 

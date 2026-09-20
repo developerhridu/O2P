@@ -135,7 +135,7 @@ namespace O2P.Api.Controllers
         [Authorize]
         [HttpPost("change-password")]
         public async Task<IActionResult> ChangePassword([FromBody] ChangePasswordRequest request)
-        {
+            {
             var user = await _userManager.GetUserAsync(User);
             if (user == null) return Unauthorized();
 

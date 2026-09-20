@@ -7,7 +7,7 @@
 //
 // Logs in ONCE and reuses the token: the API allows 5 logins per 5 minutes.
 //
-// Usage: O2P_API=http://localhost:5000 O2P_UI_URL=http://127.0.0.1:5151 O2P_ADMIN_PW=... node scripts/verify-builder-grid.mjs
+// Usage: O2P_API=http://127.0.0.1:5050 O2P_UI_URL=http://127.0.0.1:5252 O2P_ADMIN_PW=... node scripts/verify-builder-grid.mjs
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -16,9 +16,22 @@ const { chromium } = await import(
   pathToFileURL(path.resolve(process.cwd(), 'web', 'node_modules', 'playwright-core', 'index.mjs')).href
 );
 
-const API = process.env.O2P_API || 'http://localhost:5000';
-const UI = process.env.O2P_UI_URL || 'http://127.0.0.1:5151';
-const PASSWORD = process.env.O2P_ADMIN_PW || 'RailCheck2026!Xy';
+// SAFETY: this seeds and deletes data, so it must only ever run against a throwaway API. It has no
+// default target and refuses the usual dev ports, so a stray run cannot land on a real environment.
+const API = process.env.O2P_API;
+const UI = process.env.O2P_UI_URL;
+const PASSWORD = process.env.O2P_ADMIN_PW;
+if (!API || !UI || !PASSWORD) {
+  console.log('Set O2P_API, O2P_UI_URL and O2P_ADMIN_PW (all three) - this script will not guess a target.');
+  process.exit(2);
+}
+for (const u of [API, UI]) {
+  const port = new URL(u).port;
+  if (['5000', '5151', '3051', '3052'].includes(port)) {
+    console.log(`Refusing to run against port ${port}: that is a normal dev/deploy port. Use a throwaway API and UI on other ports.`);
+    process.exit(2);
+  }
+}
 const CHROME = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const OUT = path.resolve(process.cwd(), 'artifacts', 'builder-grid');
 const TABLE_COUNT = 5000;
