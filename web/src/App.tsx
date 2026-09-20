@@ -13,20 +13,29 @@ import Settings from './pages/Settings';
 import Discovery from './pages/Discovery';
 import Users from './pages/Users';
 import Layout from './components/Layout';
-import { AUTH_EVENT, getAuthState, isAuthenticated } from './api';
+import { AUTH_EVENT, getAuthState, isAuthenticated, msUntilTokenExpiry } from './api';
 
 function App() {
-  const [, setAuthVersion] = useState(0);
+  const [authVersion, setAuthVersion] = useState(0);
 
   useEffect(() => {
     const onAuthChanged = () => setAuthVersion((v) => v + 1);
     window.addEventListener(AUTH_EVENT, onAuthChanged);
     window.addEventListener('storage', onAuthChanged);
+
+    // Re-render (and so redirect to /login) the moment the stored token expires,
+    // even if the user is sitting idle on a page.
+    const remaining = msUntilTokenExpiry();
+    const expiryTimer = remaining !== null
+      ? window.setTimeout(onAuthChanged, Math.min(Math.max(remaining, 0) + 500, 2 ** 31 - 1))
+      : undefined;
+
     return () => {
       window.removeEventListener(AUTH_EVENT, onAuthChanged);
       window.removeEventListener('storage', onAuthChanged);
+      if (expiryTimer !== undefined) window.clearTimeout(expiryTimer);
     };
-  }, []);
+  }, [authVersion]);
 
   const authenticated = isAuthenticated();
   const auth = getAuthState();

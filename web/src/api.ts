@@ -80,8 +80,36 @@ export function logout() {
   window.dispatchEvent(new Event(AUTH_EVENT));
 }
 
+// Expiry (ms since epoch) from the JWT `exp` claim, or null if the token can't be decoded.
+function tokenExpiryMs(token: string): number | null {
+  try {
+    const payload = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    const exp = JSON.parse(atob(payload)).exp;
+    return typeof exp === 'number' ? exp * 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
+// Authenticated = a token is stored AND it has not expired. An expired token is cleared,
+// so the caller (App.tsx) redirects to /login like any ordinary app.
 export function isAuthenticated() {
-  return !!localStorage.getItem(TOKEN_KEY);
+  const token = localStorage.getItem(TOKEN_KEY);
+  if (!token) return false;
+  const expiresAt = tokenExpiryMs(token);
+  if (expiresAt !== null && expiresAt <= Date.now()) {
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(AUTH_KEY);
+    return false;
+  }
+  return true;
+}
+
+// Milliseconds until the stored token expires (null when there is no token / no exp claim).
+export function msUntilTokenExpiry(): number | null {
+  const token = localStorage.getItem(TOKEN_KEY);
+  const expiresAt = token ? tokenExpiryMs(token) : null;
+  return expiresAt === null ? null : expiresAt - Date.now();
 }
 
 // A 401 here means the stored session token is no longer valid (expired or revoked).
@@ -100,6 +128,18 @@ export async function authMe() {
   const res = await apiFetch(`${API_BASE}/auth/me`, { headers: getHeaders() });
   if (!res.ok) throw new Error('Failed to load current user');
   return res.json();
+}
+
+// Change password from the login page - no session needed; the current password is the proof.
+export async function changePasswordPublic(username: string, currentPassword: string, newPassword: string) {
+  const res = await apiFetch(`${API_BASE}/auth/change-password-public`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, currentPassword, newPassword })
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.message || 'Failed to change password');
+  return data;
 }
 
 export async function changePassword(currentPassword: string, newPassword: string) {

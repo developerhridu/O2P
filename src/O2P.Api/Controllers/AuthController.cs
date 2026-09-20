@@ -8,6 +8,7 @@ using O2P.Domain.Entities;
 using System;
 using System.Collections.Generic;
 using System.IdentityModel.Tokens.Jwt;
+using System.Linq;
 using System.Security.Claims;
 using System.Text;
 using System.Threading.Tasks;
@@ -42,6 +43,13 @@ namespace O2P.Api.Controllers
             public string NewPassword { get; set; } = null!;
         }
 
+        public class PublicChangePasswordRequest
+        {
+            public string Username { get; set; } = null!;
+            public string CurrentPassword { get; set; } = null!;
+            public string NewPassword { get; set; } = null!;
+        }
+
         [EnableRateLimiting("login")]
         [HttpPost("login")]
         public async Task<IActionResult> Login([FromBody] LoginRequest request)
@@ -67,6 +75,40 @@ namespace O2P.Api.Controllers
             var roles = await _userManager.GetRolesAsync(user);
             var token = GenerateJwtToken(user, roles);
             return Ok(BuildAuthResponse(user, roles, token));
+        }
+
+        // Change password from the login page (no session token). Requires the current password,
+        // shares the login rate limit and counts failures toward account lockout.
+        [EnableRateLimiting("login")]
+        [HttpPost("change-password-public")]
+        public async Task<IActionResult> ChangePasswordPublic([FromBody] PublicChangePasswordRequest request)
+        {
+            var user = await _userManager.FindByNameAsync(request.Username ?? string.Empty);
+            if (user == null || !user.IsActive) return Unauthorized(new { message = "Invalid credentials" });
+
+            var signIn = await _signInManager.CheckPasswordSignInAsync(user, request.CurrentPassword, true);
+            if (signIn.IsLockedOut)
+            {
+                return StatusCode(423, new { message = "This account is temporarily locked due to repeated failed sign-in attempts." });
+            }
+            if (!signIn.Succeeded) return Unauthorized(new { message = "Invalid credentials" });
+
+            var result = await _userManager.ChangePasswordAsync(user, request.CurrentPassword, request.NewPassword);
+            if (!result.Succeeded)
+            {
+                return BadRequest(new
+                {
+                    message = "Password change failed: " + string.Join(" ", result.Errors.Select(e => e.Description)),
+                    errors = result.Errors
+                });
+            }
+
+            user.MustChangePassword = false;
+            user.LastPasswordChangedAt = DateTimeOffset.UtcNow;
+            await _userManager.UpdateSecurityStampAsync(user);
+            await _userManager.UpdateAsync(user);
+
+            return Ok(new { message = "Password updated. Please sign in with your new password." });
         }
 
         [Authorize]

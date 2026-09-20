@@ -109,24 +109,32 @@ public sealed class MetadataDbInitializerHostedService : IHostedService
             }
             else
             {
+                // Only touch an existing admin while it still has the seed password. Once the admin
+                // has changed it, restarts must leave the account (and MustChangePassword) alone.
                 var usedDefaultBootstrapPassword = effectiveBootstrapPassword == "AdminPassword123!";
-                if (usedDefaultBootstrapPassword)
+                if (await userManager.CheckPasswordAsync(adminUser, "AdminPassword123!"))
                 {
-                    adminUser.MustChangePassword = true;
-                    await userManager.UpdateAsync(adminUser);
-                    _logger.LogWarning("Bootstrap admin is using the default fallback password. Set BootstrapAdmin__Password or O2P_ADMIN_PASSWORD immediately for public deployments.");
-                }
-                else if (await userManager.CheckPasswordAsync(adminUser, "AdminPassword123!"))
-                {
-                    var resetToken = await userManager.GeneratePasswordResetTokenAsync(adminUser);
-                    var resetResult = await userManager.ResetPasswordAsync(adminUser, resetToken, effectiveBootstrapPassword);
-                    if (resetResult.Succeeded)
+                    if (usedDefaultBootstrapPassword)
                     {
-                        adminUser.MustChangePassword = true;
-                        adminUser.LastPasswordChangedAt = DateTimeOffset.UtcNow;
-                        await userManager.UpdateSecurityStampAsync(adminUser);
-                        await userManager.UpdateAsync(adminUser);
-                        _logger.LogInformation("Bootstrap admin password rotated away from the default seed password.");
+                        if (!adminUser.MustChangePassword)
+                        {
+                            adminUser.MustChangePassword = true;
+                            await userManager.UpdateAsync(adminUser);
+                        }
+                        _logger.LogWarning("Bootstrap admin is using the default fallback password. Set BootstrapAdmin__Password or O2P_ADMIN_PASSWORD immediately for public deployments.");
+                    }
+                    else
+                    {
+                        var resetToken = await userManager.GeneratePasswordResetTokenAsync(adminUser);
+                        var resetResult = await userManager.ResetPasswordAsync(adminUser, resetToken, effectiveBootstrapPassword);
+                        if (resetResult.Succeeded)
+                        {
+                            adminUser.MustChangePassword = true;
+                            adminUser.LastPasswordChangedAt = DateTimeOffset.UtcNow;
+                            await userManager.UpdateSecurityStampAsync(adminUser);
+                            await userManager.UpdateAsync(adminUser);
+                            _logger.LogInformation("Bootstrap admin password rotated away from the default seed password.");
+                        }
                     }
                 }
             }

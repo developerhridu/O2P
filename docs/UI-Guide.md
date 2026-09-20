@@ -37,7 +37,7 @@ This guide walks you through the O2P web interface from the sign-in page to a ve
   └────────┘   └────────────┘   └─────────────┘   └────┬─────┘
                                                        │
   ┌────────┐   ┌────────────┐   ┌─────────────┐        ▼
-  │ Fix /  │◀──│ Verify     │◀──│ Monitor     │◀──┌──────────┐
+  │ Fix /  │◀──│ Verify     │◀──│ Monitor    │◀──┌──────────┐
   │ re-run │   │ row counts │   │ Job Details │   │ Launch   │
   └────────┘   └────────────┘   └─────────────┘   │ job      │
                                                   └──────────┘
