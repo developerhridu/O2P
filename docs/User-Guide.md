@@ -1,5 +1,7 @@
 # User Guide
 
+> Prefer a screen-by-screen walkthrough of the web UI? See the [UI Guide](UI-Guide.md).
+
 This guide describes the behavior implemented in the current O2P codebase. O2P is an Oracle-to-PostgreSQL migration control plane: it discovers Oracle tables, records a migration manifest, creates or reuses same-named PostgreSQL tables, copies data in chunks, and compares source and target row counts.
 
 > **Important safety warning**
