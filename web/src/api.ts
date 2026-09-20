@@ -1,4 +1,7 @@
-export const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api/v1';
+import { commandLabel } from './labels';
+
+// Dev: relative /api/v1 is proxied by Vite to the API. Override with VITE_API_BASE_URL for static/prod hosts.
+export const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api/v1';
 const TOKEN_KEY = 'o2p_token';
 const AUTH_KEY = 'o2p_auth';
 export const AUTH_EVENT = 'o2p-auth-changed';
@@ -79,8 +82,36 @@ export function logout() {
   window.dispatchEvent(new Event(AUTH_EVENT));
 }
 
+// Expiry (ms since epoch) from the JWT `exp` claim, or null if the token can't be decoded.
+function tokenExpiryMs(token: string): number | null {
+  try {
+    const payload = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    const exp = JSON.parse(atob(payload)).exp;
+    return typeof exp === 'number' ? exp * 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
+// Authenticated = a token is stored AND it has not expired. An expired token is cleared,
+// so the caller (App.tsx) redirects to /login like any ordinary app.
 export function isAuthenticated() {
-  return !!localStorage.getItem(TOKEN_KEY);
+  const token = localStorage.getItem(TOKEN_KEY);
+  if (!token) return false;
+  const expiresAt = tokenExpiryMs(token);
+  if (expiresAt !== null && expiresAt <= Date.now()) {
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(AUTH_KEY);
+    return false;
+  }
+  return true;
+}
+
+// Milliseconds until the stored token expires (null when there is no token / no exp claim).
+export function msUntilTokenExpiry(): number | null {
+  const token = localStorage.getItem(TOKEN_KEY);
+  const expiresAt = token ? tokenExpiryMs(token) : null;
+  return expiresAt === null ? null : expiresAt - Date.now();
 }
 
 // A 401 here means the stored session token is no longer valid (expired or revoked).
@@ -97,8 +128,20 @@ export async function apiFetch(input: string, init?: RequestInit): Promise<Respo
 
 export async function authMe() {
   const res = await apiFetch(`${API_BASE}/auth/me`, { headers: getHeaders() });
-  if (!res.ok) throw new Error('Failed to load current user');
+  if (!res.ok) throw new Error('Could not load your account.');
   return res.json();
+}
+
+// Change password from the login page - no session needed; the current password is the proof.
+export async function changePasswordPublic(username: string, currentPassword: string, newPassword: string) {
+  const res = await apiFetch(`${API_BASE}/auth/change-password-public`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, currentPassword, newPassword })
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.message || 'Could not change the password.');
+  return data;
 }
 
 export async function changePassword(currentPassword: string, newPassword: string) {
@@ -109,7 +152,7 @@ export async function changePassword(currentPassword: string, newPassword: strin
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(data.message || 'Failed to change password');
+    throw new Error(data.message || 'Could not change the password.');
   }
   setAuthState(data);
   return data;
@@ -118,7 +161,7 @@ export async function changePassword(currentPassword: string, newPassword: strin
 // Connections
 export async function fetchConnections() {
   const res = await apiFetch(`${API_BASE}/connections`, { headers: getHeaders() });
-  if (!res.ok) throw new Error('Failed to fetch connections');
+  if (!res.ok) throw new Error('Could not load the databases.');
   return res.json();
 }
 
@@ -130,7 +173,7 @@ export async function createConnection(connection: any) {
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error(err.message || 'Failed to create connection');
+    throw new Error(err.message || 'Could not add the database.');
   }
   return res.json();
 }
@@ -140,7 +183,7 @@ export async function deleteConnection(id: number) {
     method: 'DELETE',
     headers: getHeaders()
   });
-  if (!res.ok) throw new Error('Failed to delete connection');
+  if (!res.ok) throw new Error('Could not delete the database.');
 }
 
 export async function testConnection(id: number) {
@@ -150,7 +193,7 @@ export async function testConnection(id: number) {
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error(err.message || 'Connection test failed');
+    throw new Error(err.message || 'Could not connect.');
   }
   return res.json();
 }
@@ -158,13 +201,13 @@ export async function testConnection(id: number) {
 // Applications
 export async function fetchApplications() {
   const res = await apiFetch(`${API_BASE}/applications`, { headers: getHeaders() });
-  if (!res.ok) throw new Error('Failed to fetch applications');
+  if (!res.ok) throw new Error('Could not load the migrations.');
   return res.json();
 }
 
 export async function fetchApplication(id: number) {
   const res = await apiFetch(`${API_BASE}/applications/${id}`, { headers: getHeaders() });
-  if (!res.ok) throw new Error('Failed to fetch application');
+  if (!res.ok) throw new Error('Could not load this migration.');
   return res.json();
 }
 
@@ -174,7 +217,7 @@ export async function createApplication(app: any) {
     headers: getHeaders(),
     body: JSON.stringify(app)
   });
-  if (!res.ok) throw new Error('Failed to create application');
+  if (!res.ok) throw new Error('Could not create the migration.');
   return res.json();
 }
 
@@ -184,41 +227,84 @@ export async function updateApplication(id: number, app: any) {
     headers: getHeaders(),
     body: JSON.stringify(app)
   });
-  if (!res.ok) throw new Error('Failed to update application');
+  if (!res.ok) throw new Error('Could not save the migration.');
   return res.json();
 }
 
 // Discovery
 export async function fetchDiscoveredTables(connectionId: number, owner: string) {
-  const res = await apiFetch(`${API_BASE}/connections/${connectionId}/discovery?owner=${owner}`, {
+  const res = await apiFetch(`${API_BASE}/connections/${connectionId}/discovery?owner=${encodeURIComponent(owner)}`, {
     headers: getHeaders()
   });
-  if (!res.ok) throw new Error(await readErrorMessage(res, 'Failed to fetch discovery cache'));
+  if (!res.ok) throw new Error(await readErrorMessage(res, 'Could not load the scanned tables.'));
   return res.json();
+}
+
+export type SourceSchema = { name: string; tableCount: number };
+export type SourceSchemaList = { schemas: SourceSchema[]; skipped: number };
+
+export type TargetSchema = { name: string; canCreate: boolean };
+
+// Schemas in a PostgreSQL destination that this account can use, for the destination picker.
+export async function fetchTargetSchemas(connectionId: number): Promise<{ schemas: TargetSchema[] }> {
+  const res = await apiFetch(`${API_BASE}/connections/${connectionId}/schemas`, {
+    headers: getHeaders()
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, 'Could not load the schemas.'));
+  return res.json();
+}
+
+// The schemas the source account can read tables from, for the schema picker.
+export async function fetchSchemas(connectionId: number): Promise<SourceSchemaList> {
+  const res = await apiFetch(`${API_BASE}/connections/${connectionId}/discovery/schemas`, {
+    headers: getHeaders()
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, 'Could not load the schemas.'));
+  return res.json();
+}
+
+export type TableSync = {
+  owner: string;
+  tableName: string;
+  rows: number;
+  rowsCountedAt: string;
+  bytes: number | null;
+  sizeIsEstimate: boolean;
+};
+
+// Brings one table's row count and size up to date. One per call so the UI can show progress and
+// be stopped part-way; counting a whole schema in a single request could not be interrupted.
+export async function syncTableStats(connectionId: number, owner: string, table: string) {
+  const res = await apiFetch(
+    `${API_BASE}/connections/${connectionId}/discovery/sync?owner=${encodeURIComponent(owner)}&table=${encodeURIComponent(table)}`,
+    { method: 'POST', headers: getHeaders() }
+  );
+  if (!res.ok) throw new Error(await readErrorMessage(res, `Could not sync ${table}.`));
+  return res.json() as Promise<TableSync>;
 }
 
 // tableNames omitted/empty -> full schema scan (replaces the owner's whole cache).
 // tableNames provided -> targeted lookup for just those tables (does not disturb the rest of the cache).
 export async function refreshDiscovery(connectionId: number, owner: string, tableNames?: string[]) {
-  const res = await apiFetch(`${API_BASE}/connections/${connectionId}/discovery/refresh?owner=${owner}`, {
+  const res = await apiFetch(`${API_BASE}/connections/${connectionId}/discovery/refresh?owner=${encodeURIComponent(owner)}`, {
     method: 'POST',
     headers: getHeaders(),
     body: JSON.stringify({ tableNames: tableNames && tableNames.length > 0 ? tableNames : null })
   });
-  if (!res.ok) throw new Error(await readErrorMessage(res, 'Failed to refresh discovery'));
+  if (!res.ok) throw new Error(await readErrorMessage(res, 'Could not scan the source database.'));
   return res.json();
 }
 
 // Manifests
 export async function fetchManifests(appId: number) {
   const res = await apiFetch(`${API_BASE}/applications/${appId}/manifests`, { headers: getHeaders() });
-  if (!res.ok) throw new Error(await readErrorMessage(res, 'Failed to fetch manifests'));
+  if (!res.ok) throw new Error(await readErrorMessage(res, 'Could not load the table selections.'));
   return res.json();
 }
 
 export async function fetchManifest(id: number) {
   const res = await apiFetch(`${API_BASE}/manifests/${id}`, { headers: getHeaders() });
-  if (!res.ok) throw new Error(await readErrorMessage(res, 'Failed to fetch manifest'));
+  if (!res.ok) throw new Error(await readErrorMessage(res, 'Could not load this table selection.'));
   return res.json();
 }
 
@@ -228,7 +314,7 @@ export async function createManifest(appId: number, manifest: any) {
     headers: getHeaders(),
     body: JSON.stringify(manifest)
   });
-  if (!res.ok) throw new Error(await readErrorMessage(res, 'Failed to create manifest'));
+  if (!res.ok) throw new Error(await readErrorMessage(res, 'Could not create the table selection.'));
   return res.json();
 }
 
@@ -238,28 +324,28 @@ export async function updateManifestTables(manifestId: number, tables: any[]) {
     headers: getHeaders(),
     body: JSON.stringify(tables)
   });
-  if (!res.ok) throw new Error(await readErrorMessage(res, 'Failed to update manifest tables'));
+  if (!res.ok) throw new Error(await readErrorMessage(res, 'Could not save the selected tables.'));
 }
 
 export async function generateManifest(appId: number, connectionId: number, owner: string) {
-  const res = await apiFetch(`${API_BASE}/applications/${appId}/manifests/generate?connectionId=${connectionId}&owner=${owner}`, {
+  const res = await apiFetch(`${API_BASE}/applications/${appId}/manifests/generate?connectionId=${connectionId}&owner=${encodeURIComponent(owner)}`, {
     method: 'POST',
     headers: getHeaders()
   });
-  if (!res.ok) throw new Error(await readErrorMessage(res, 'Failed to auto-generate manifest'));
+  if (!res.ok) throw new Error(await readErrorMessage(res, 'Could not build the table selection automatically.'));
   return res.json();
 }
 
 // Jobs
 export async function fetchJobs() {
   const res = await apiFetch(`${API_BASE}/jobs`, { headers: getHeaders() });
-  if (!res.ok) throw new Error('Failed to fetch jobs');
+  if (!res.ok) throw new Error('Could not load the runs.');
   return res.json();
 }
 
 export async function fetchJob(id: number) {
   const res = await apiFetch(`${API_BASE}/jobs/${id}`, { headers: getHeaders() });
-  if (!res.ok) throw new Error('Failed to fetch job run');
+  if (!res.ok) throw new Error('Could not load this run.');
   return res.json();
 }
 
@@ -269,7 +355,25 @@ export async function createJob(job: any) {
     headers: getHeaders(),
     body: JSON.stringify(job)
   });
-  if (!res.ok) throw new Error('Failed to create job run');
+  // Surface the server's reason: it says things like "no tables ticked", which the user can act on.
+  if (!res.ok) throw new Error(await readErrorMessage(res, 'Could not create the run.'));
+  return res.json();
+}
+
+export type WorkerStatus = {
+  running: boolean;
+  count: number;
+  multiple: boolean;
+  workers: { host: string; processId: number; startedAt: string; lastSeenAt: string }[];
+  staleAfterSeconds: number;
+  serverTime: string;
+};
+
+// Whether anything is processing runs. A run just says "Waiting" when the Worker is not running,
+// with no hint why - this is what lets the screen say so.
+export async function fetchWorkerStatus(): Promise<WorkerStatus> {
+  const res = await apiFetch(`${API_BASE}/workers/status`, { headers: getHeaders() });
+  if (!res.ok) throw new Error('Could not check whether the copier is running.');
   return res.json();
 }
 
@@ -281,7 +385,10 @@ export async function launchJob(id: number, confirmationPhrase?: string) {
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error(err.message || 'Job launch failed');
+    // `errors` carries the per-check preflight detail. Without it the operator just sees
+    // "Preflight check failed" and has no idea which check stopped the launch.
+    const message = err.message || 'Could not start the run.';
+    throw new Error(err.errors ? `${message}\n${err.errors}` : message);
   }
   return res.json();
 }
@@ -292,7 +399,17 @@ export async function commandJob(id: number, command: string, payload?: string) 
     headers: getHeaders(),
     body: JSON.stringify({ command, scope: 'job', payload })
   });
-  if (!res.ok) throw new Error('Failed to send job command');
+  if (!res.ok) {
+    throw new Error(await readErrorMessage(res, `Could not ${commandLabel(command)}.`));
+  }
+}
+
+/** Removes a finished (or never-started) run and its history. A waiting/running/paused run must be cancelled first. */
+export async function deleteJob(id: number) {
+  const res = await apiFetch(`${API_BASE}/jobs/${id}`, { method: 'DELETE', headers: getHeaders() });
+  if (!res.ok) {
+    throw new Error(await readErrorMessage(res, 'Could not delete the run.'));
+  }
 }
 
 // Admin: cancel every non-terminal job at once and signal the Worker(s) to restart.
@@ -302,19 +419,19 @@ export async function cancelAllAndRestartWorker() {
     headers: getHeaders()
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.message || 'Failed to cancel jobs / restart worker');
+  if (!res.ok) throw new Error(data.message || 'Could not cancel the runs or restart the copier.');
   return data;
 }
 
 export async function fetchMetrics(jobId: number) {
   const res = await apiFetch(`${API_BASE}/jobs/${jobId}/metrics`, { headers: getHeaders() });
-  if (!res.ok) throw new Error('Failed to fetch metrics');
+  if (!res.ok) throw new Error('Could not load progress figures.');
   return res.json();
 }
 
 export async function fetchValidation(jobId: number) {
   const res = await apiFetch(`${API_BASE}/jobs/${jobId}/validation`, { headers: getHeaders() });
-  if (!res.ok) throw new Error('Failed to fetch validation');
+  if (!res.ok) throw new Error('Could not load the row count check.');
   return res.json();
 }
 
@@ -323,14 +440,14 @@ export async function runPreflight(jobId: number) {
     method: 'POST',
     headers: getHeaders()
   });
-  if (!res.ok) throw new Error('Failed to run preflight');
+  if (!res.ok) throw new Error('Could not run the readiness check.');
   return res.json();
 }
 
 // User management
 export async function fetchUsers() {
   const res = await apiFetch(`${API_BASE}/users`, { headers: getHeaders() });
-  if (!res.ok) throw new Error('Failed to fetch users');
+  if (!res.ok) throw new Error('Could not load the users.');
   return res.json();
 }
 
@@ -341,7 +458,7 @@ export async function createUser(payload: any) {
     body: JSON.stringify(payload)
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.message || 'Failed to create user');
+  if (!res.ok) throw new Error(data.message || 'Could not create the user.');
   return data;
 }
 
@@ -352,7 +469,7 @@ export async function updateUser(id: string, payload: any) {
     body: JSON.stringify(payload)
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.message || 'Failed to update user');
+  if (!res.ok) throw new Error(data.message || 'Could not save the user.');
   return data;
 }
 
@@ -363,7 +480,7 @@ export async function resetUserPassword(id: string, newPassword: string, mustCha
     body: JSON.stringify({ newPassword, mustChangePassword })
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.message || 'Failed to reset password');
+  if (!res.ok) throw new Error(data.message || 'Could not reset the password.');
   return data;
 }
 
@@ -373,6 +490,6 @@ export async function unlockUser(id: string) {
     headers: getHeaders()
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.message || 'Failed to unlock user');
+  if (!res.ok) throw new Error(data.message || 'Could not unlock the user.');
   return data;
 }

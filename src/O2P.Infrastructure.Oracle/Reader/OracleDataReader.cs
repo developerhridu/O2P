@@ -108,6 +108,9 @@ namespace O2P.Infrastructure.Oracle.Reader
             using var cmd = conn.CreateCommand();
             cmd.CommandText = sql;
             cmd.BindByName = true;
+            // Bound Oracle command time so a blocked session cannot hold a worker slot forever.
+            // CancelAfter on the worker CTS is the outer guard; this helps ODP.NET abort sooner.
+            cmd.CommandTimeout = 600;
             if (isPkRange)
             {
                 if (chunk.StartRowId != "MIN")

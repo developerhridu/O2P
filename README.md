@@ -75,4 +75,6 @@ cmd /c npm run build
 - PG-Live launches require a typed confirmation phrase: `MIGRATE <application-name> LIVE`.
 - Worker execution is chunk based. Chunks are claimable with database locks, leases are recovered, and a target-side `_o2p_chunk_log` fence prevents duplicate chunk loads after retries.
 
+New to O2P? Follow the screen-by-screen [UI Guide](docs/UI-Guide.md). Setup, permissions and tuning are in [docs/User-Guide.md](docs/User-Guide.md).
+
 See [docs/O2P_Production_Hardening_Plan.md](docs/O2P_Production_Hardening_Plan.md), [docs/DBA_Grants.md](docs/DBA_Grants.md), and [docs/Ops_Runbook.md](docs/Ops_Runbook.md) for the production checklist.

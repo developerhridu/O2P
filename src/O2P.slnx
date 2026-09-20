@@ -6,4 +6,5 @@
   <Project Path="O2P.Infrastructure.Oracle/O2P.Infrastructure.Oracle.csproj" />
   <Project Path="O2P.Infrastructure.Postgres/O2P.Infrastructure.Postgres.csproj" />
   <Project Path="O2P.Worker/O2P.Worker.csproj" />
+  <Project Path="../tests/O2P.Application.Tests/O2P.Application.Tests.csproj" />
 </Solution>

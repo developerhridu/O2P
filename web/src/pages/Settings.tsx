@@ -52,9 +52,9 @@ export default function Settings() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
       <div>
-        <h1 className="text-gradient" style={{ margin: 0 }}>Global Settings</h1>
+        <h1 className="text-gradient" style={{ margin: 0 }}>Settings</h1>
         <p style={{ margin: '4px 0 0 0', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
-          Configure orchestrator throttling limits, telemetry sampling, and post-migration validation rules.
+          Set speed limits, how often progress is recorded, and how finished data is checked.
         </p>
       </div>
 
@@ -62,7 +62,7 @@ export default function Settings() {
         {saved && (
           <div className="card" style={{ border: '1px solid rgba(16, 185, 129, 0.2)', background: 'rgba(16, 185, 129, 0.05)', display: 'flex', alignItems: 'center', gap: '10px', color: '#34d399', padding: '16px' }}>
             <CheckCircle2 size={18} />
-            <span>Settings saved successfully! Parameters updated in the orchestrator profile.</span>
+            <span>Settings saved.</span>
           </div>
         )}
 
@@ -71,7 +71,7 @@ export default function Settings() {
           <div className="card">
             <h3 style={{ margin: '0 0 20px 0', display: 'flex', alignItems: 'center', gap: '8px' }}>
               <Sliders size={18} style={{ color: '#3b82f6' }} />
-              <span>Concurrency & Throttling</span>
+              <span>Speed limits</span>
             </h3>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
@@ -86,12 +86,12 @@ export default function Settings() {
                   onChange={e => setMaxConcurrentTables(Number(e.target.value))}
                 />
                 <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-                  Number of tables processed in parallel per worker instance.
+                  How many tables are copied at the same time.
                 </span>
               </div>
 
               <div>
-                <label className="label">Max Chunk Workers Per Table</label>
+                <label className="label">Batches copied at once per table</label>
                 <input
                   className="input"
                   type="number"
@@ -101,12 +101,12 @@ export default function Settings() {
                   onChange={e => setMaxChunksPerTable(Number(e.target.value))}
                 />
                 <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-                  Maximum parallel execution threads allocated per individual table copy.
+                  How many batches of one table are copied at the same time.
                 </span>
               </div>
 
               <div>
-                <label className="label">Global Oracle Active Session Ceiling</label>
+                <label className="label">Maximum Oracle sessions</label>
                 <input
                   className="input"
                   type="number"
@@ -116,7 +116,7 @@ export default function Settings() {
                   onChange={e => setMaxOracleSessions(Number(e.target.value))}
                 />
                 <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-                  Limits total concurrent sessions established on the source Oracle DBMS.
+                  The most connections opened to the source Oracle database at once.
                 </span>
               </div>
             </div>
@@ -127,15 +127,15 @@ export default function Settings() {
             <div className="card">
               <h3 style={{ margin: '0 0 20px 0', display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <Shield size={18} style={{ color: '#8b5cf6' }} />
-                <span>Verification & Validation</span>
+                <span>Checking copied data</span>
               </h3>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div>
-                    <label className="label" style={{ margin: 0 }}>Automated Count Verification</label>
+                    <label className="label" style={{ margin: 0 }}>Check row counts automatically</label>
                     <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-                      Enforce count audits against source and targets upon load completion.
+                      Compare source and destination row counts when a table finishes.
                     </span>
                   </div>
                   <input
@@ -147,7 +147,7 @@ export default function Settings() {
                 </div>
 
                 <div>
-                  <label className="label">Sampled Row-Hash Threshold</label>
+                  <label className="label">Deep check row limit</label>
                   <input
                     className="input"
                     type="number"
@@ -156,7 +156,7 @@ export default function Settings() {
                     onChange={e => setSampleHashLimit(Number(e.target.value))}
                   />
                   <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-                    Row count ceiling above which bisection hash verification is triggered.
+                    Above this many rows, a deeper content check runs instead of a plain count.
                   </span>
                 </div>
               </div>
@@ -165,13 +165,13 @@ export default function Settings() {
             <div className="card">
               <h3 style={{ margin: '0 0 20px 0', display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <Activity size={18} style={{ color: '#10b981' }} />
-                <span>Telemetry & Storage</span>
+                <span>Monitoring & history</span>
               </h3>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
                   <div>
-                    <label className="label">Sampling Interval (sec)</label>
+                    <label className="label">Progress recorded every (sec)</label>
                     <input
                       className="input"
                       type="number"
@@ -182,7 +182,7 @@ export default function Settings() {
                     />
                   </div>
                   <div>
-                    <label className="label">Retention period (days)</label>
+                    <label className="label">Keep history for (days)</label>
                     <input
                       className="input"
                       type="number"
@@ -200,7 +200,7 @@ export default function Settings() {
 
         <button className="btn" type="submit" style={{ alignSelf: 'flex-end' }}>
           <Save size={18} />
-          <span>Save Configuration</span>
+          <span>Save settings</span>
         </button>
       </form>
     </div>

@@ -162,13 +162,13 @@ async function run() {
   await userRow.getByRole('button', { name: /edit/i }).click();
   await page.locator('label:has-text("Force password change") input').check();
   await page.getByRole('button', { name: /save user/i }).click();
-  await userRow.getByText(/change required/i).waitFor();
+  await userRow.getByText(/must change/i).waitFor();
   actions.push('edited_temp_user');
 
   await userRow.getByRole('button', { name: /reset password/i }).click();
   await inputByLabel('New Temporary Password').fill(tempUserResetPassword);
   await page.locator('div.fixed.inset-0').last().getByRole('button', { name: /^reset password$/i }).click();
-  await userRow.getByText(/change required/i).waitFor();
+  await userRow.getByText(/must change/i).waitFor();
   actions.push('reset_temp_user_password');
 
   await signOut();
@@ -198,7 +198,7 @@ async function run() {
   await page.getByRole('heading', { name: /connection profiles/i }).waitFor();
   await snap('05-connections.png');
 
-  await page.getByRole('button', { name: /new connection/i }).click();
+  await page.getByRole('button', { name: /new database/i }).click();
   await inputByLabel('Profile Name').fill(tempConnection);
   await inputByLabel('Database Engine').selectOption('postgres');
   await inputByLabel('Host Address / IP').fill('127.0.0.1');
@@ -206,7 +206,7 @@ async function run() {
   await inputByLabel('Database Name').fill('postgres');
   await inputByLabel('Username').fill('qa_validation');
   await page.locator('label:has-text("Password")').locator('xpath=following-sibling::input[1]').fill('QaPlaceholder2026!D');
-  await page.getByRole('button', { name: /save profile/i }).click();
+  await page.getByRole('button', { name: /^save$/i }).click();
   await page.getByText(tempConnection).waitFor();
   actions.push('created_temp_connection');
 
@@ -219,7 +219,7 @@ async function run() {
   await page.getByRole('heading', { name: /^applications$/i }).waitFor();
   await snap('06-applications.png');
 
-  await page.getByRole('button', { name: /new application/i }).click();
+  await page.getByRole('button', { name: /new migration/i }).click();
   await inputByLabel('Application Name').fill(tempApplication);
   await inputByLabel('Description').fill('Temporary application created by Chrome QA.');
   await page.getByRole('button', { name: /^create$/i }).click();
@@ -232,7 +232,7 @@ async function run() {
   await page.getByRole('heading', { name: tempApplication }).waitFor();
   await snap('07-application-detail.png');
 
-  await page.getByRole('button', { name: /^assign$/i }).first().click();
+  await page.getByRole('button', { name: /^choose$/i }).first().click();
   await page.getByRole('heading', { name: /assign connection slot/i }).waitFor();
   const select = page.locator('select').last();
   const options = await select.locator('option').allTextContents();
@@ -244,7 +244,7 @@ async function run() {
   } else {
     throw new Error('No connection options available for application slot assignment.');
   }
-  await page.getByRole('button', { name: /^assign$/i }).last().click();
+  await page.getByRole('button', { name: /^choose$/i }).last().click();
   await page.locator('div.fixed.inset-0').waitFor({ state: 'detached' });
   await page.getByRole('button', { name: /unassign/i }).first().waitFor();
   actions.push('assigned_application_slot');
@@ -254,8 +254,8 @@ async function run() {
   await snap('08-settings.png');
   const maxConcurrentTables = inputByLabel('Max Concurrent Tables');
   await maxConcurrentTables.fill('5');
-  await page.getByRole('button', { name: /save configuration/i }).click();
-  await page.getByText(/settings saved successfully/i).waitFor();
+  await page.getByRole('button', { name: /save settings/i }).click();
+  await page.getByText(/settings saved/i).waitFor();
   await page.reload({ waitUntil: 'networkidle' });
   if ((await maxConcurrentTables.inputValue()) !== '5') {
     throw new Error('Settings value did not persist after reload.');
@@ -265,7 +265,7 @@ async function run() {
   await page.goto(`${baseUrl}/applications`, { waitUntil: 'networkidle' });
   const tempAppCard = page.locator('h3', { hasText: tempApplication }).locator('xpath=ancestor::div[contains(@class,"group")][1]');
   page.once('dialog', (dialog) => dialog.accept());
-  await tempAppCard.getByTitle('Delete Application').click();
+  await tempAppCard.getByTitle('Delete migration').click();
   await page.getByText(tempApplication).waitFor({ state: 'detached' });
   actions.push('deleted_temp_application');
 

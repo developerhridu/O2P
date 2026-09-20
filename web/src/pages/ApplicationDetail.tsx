@@ -20,13 +20,15 @@ import {
   refreshDiscovery,
   updateApplication,
 } from '../api';
+import SchemaCombobox from '../components/SchemaCombobox';
+import { SLOTS, slotLabel } from '../labels';
 
-const slots = [
-  { key: 'oracle_test', label: 'Oracle Test', kind: 0, tone: 'text-rose-300 border-rose-500/20 bg-rose-500/10' },
-  { key: 'oracle_live', label: 'Oracle Live', kind: 0, tone: 'text-rose-300 border-rose-500/20 bg-rose-500/10' },
-  { key: 'pg_test', label: 'Postgres Test', kind: 1, tone: 'text-sky-300 border-sky-500/20 bg-sky-500/10' },
-  { key: 'pg_live', label: 'Postgres Live', kind: 1, tone: 'text-sky-300 border-sky-500/20 bg-sky-500/10' },
-];
+const TONE_BY_KIND: Record<number, string> = {
+  0: 'text-rose-300 border-rose-500/20 bg-rose-500/10',
+  1: 'text-sky-300 border-sky-500/20 bg-sky-500/10',
+};
+
+const slots = SLOTS.map((s) => ({ ...s, tone: TONE_BY_KIND[s.kind] }));
 
 export default function ApplicationDetail() {
   const { id } = useParams();
@@ -59,6 +61,13 @@ export default function ApplicationDetail() {
   const slotBindings = app?.connections || [];
   const oracleConnections = useMemo(() => connections.filter((c) => c.kind === 0), [connections]);
   const pgConnections = useMemo(() => connections.filter((c) => c.kind === 1), [connections]);
+
+  // Must match JobsController.LaunchJob exactly, or the server rejects the launch.
+  const livePhrase = `MIGRATE ${app?.name ?? ''} LIVE`;
+
+  // The destination picker lists schemas from whichever database the chosen "Copy to" role points at.
+  const targetConnectionId: number | '' =
+    slotBindings.find((b: any) => b.slot === targetSlot)?.connectionId ?? '';
 
   const loadAll = async () => {
     setLoading(true);
@@ -114,18 +123,18 @@ export default function ApplicationDetail() {
       setBindingSlot(null);
       setSelectedConnId('');
     } catch (err: any) {
-      alert(err.message || 'Failed to assign connection slot.');
+      alert(err.message || 'Could not connect that database.');
     } finally {
       setSavingBinding(false);
     }
   };
 
   const handleUnassignSlot = async (slot: string) => {
-    if (!confirm(`Unassign ${slot.replace('_', ' ')} from this application?`)) return;
+    if (!confirm(`Remove the ${slotLabel(slot)} database from this migration?`)) return;
     try {
       await saveApplicationConnections(slotBindings.filter((binding: any) => binding.slot !== slot));
     } catch (err: any) {
-      alert(err.message || 'Failed to unassign connection slot.');
+      alert(err.message || 'Could not remove the database.');
     }
   };
 
@@ -142,7 +151,7 @@ export default function ApplicationDetail() {
       setGenOwner('');
       await loadAll();
     } catch (err: any) {
-      alert(err.message || 'Failed to auto-generate manifest.');
+      alert(err.message || 'Could not find the tables automatically.');
     } finally {
       setGenLoading(false);
     }
@@ -151,8 +160,12 @@ export default function ApplicationDetail() {
   const handleLaunchJob = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!runningManifest) return;
-    if (targetSlot === 'pg_live' && confirmPhrase !== 'RUN LIVE MIGRATION') {
-      setLaunchError('Type RUN LIVE MIGRATION exactly to run against a live target.');
+    // The server requires this exact phrase for a live destination (JobsController.LaunchJob), so
+    // check the same phrase here and then actually send it - the UI used to ask for a different
+    // wording and then pass nothing, which made every live run fail.
+    const isLiveTarget = targetSlot.endsWith('live');
+    if (isLiveTarget && confirmPhrase !== livePhrase) {
+      setLaunchError(`Type ${livePhrase} exactly to run against a live database.`);
       return;
     }
 
@@ -166,11 +179,11 @@ export default function ApplicationDetail() {
         targetSlot,
         targetSchema,
       });
-      await launchJob(job.id);
+      await launchJob(job.id, isLiveTarget ? confirmPhrase : undefined);
       setRunningManifest(null);
       navigate(`/jobs/${job.id}`);
     } catch (err: any) {
-      setLaunchError(err.message || 'Failed to launch migration job.');
+      setLaunchError(err.message || 'Could not start the run.');
     } finally {
       setLaunchLoading(false);
     }
@@ -189,7 +202,7 @@ export default function ApplicationDetail() {
     return (
       <div className="card flex flex-col items-center gap-4 py-12 text-center">
         <p className="text-rose-300">{error || 'Application not found.'}</p>
-        <Link to="/applications" className="btn btn-secondary">Back to Applications</Link>
+        <Link to="/applications" className="btn btn-secondary">Back to Migrations</Link>
       </div>
     );
   }
@@ -197,7 +210,7 @@ export default function ApplicationDetail() {
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-wrap items-start gap-4">
-        <Link to="/applications" className="btn btn-secondary min-h-10 px-3" title="Back to applications">
+        <Link to="/applications" className="btn btn-secondary min-h-10 px-3" title="Back to migrations">
           <ArrowLeft size={18} />
         </Link>
         <div className="min-w-0">
@@ -214,17 +227,17 @@ export default function ApplicationDetail() {
                 <FileText size={20} />
               </span>
               <div>
-                <h2 className="m-0 text-xl font-semibold">Migration Manifests</h2>
-                <p className="m-0 text-sm text-slate-400">Build table lists, review mappings, then launch controlled runs.</p>
+                <h2 className="m-0 text-xl font-semibold">Table Selections</h2>
+                <p className="m-0 text-sm text-slate-400">Choose which tables to copy, then start a run.</p>
               </div>
             </div>
             <div className="flex flex-wrap gap-2">
               <button className="btn btn-secondary" onClick={() => setShowGenModal(true)}>
                 <Wand2 size={16} />
-                Auto-Gen Manifest
+                Find Tables Automatically
               </button>
               <Link to={`/applications/${appId}/manifests/new/builder`} className="btn">
-                Custom Builder
+                Choose Tables
               </Link>
             </div>
           </div>
@@ -234,7 +247,7 @@ export default function ApplicationDetail() {
               <div key={manifest.id} className="rounded-lg border border-slate-800 bg-slate-950/50 p-4">
                 <div className="flex flex-wrap items-center justify-between gap-4">
                   <div>
-                    <h3 className="m-0 text-lg font-semibold">{manifest.name || `Manifest v${manifest.version}`}</h3>
+                    <h3 className="m-0 text-lg font-semibold">{manifest.name || `Table selection v${manifest.version}`}</h3>
                     <p className="m-0 mt-1 text-sm text-slate-400">
                       Created {new Date(manifest.createdAt).toLocaleString()}
                     </p>
@@ -245,7 +258,7 @@ export default function ApplicationDetail() {
                     </Link>
                     <button className="btn bg-emerald-600" onClick={() => setRunningManifest(manifest)}>
                       <Play size={16} />
-                      Run Job
+                      Start Run
                     </button>
                   </div>
                 </div>
@@ -254,8 +267,8 @@ export default function ApplicationDetail() {
 
             {manifests.length === 0 && (
               <div className="rounded-lg border border-dashed border-slate-800 bg-slate-950/40 px-5 py-12 text-center">
-                <p className="m-0 text-slate-300">No manifests found.</p>
-                <p className="m-0 mt-2 text-sm text-slate-500">Use Auto-Gen Manifest after binding an Oracle profile, or open Custom Builder.</p>
+                <p className="m-0 text-slate-300">No table selections yet.</p>
+                <p className="m-0 mt-2 text-sm text-slate-500">Connect a source database first, then use Find Tables Automatically or Choose Tables.</p>
               </div>
             )}
           </div>
@@ -267,8 +280,8 @@ export default function ApplicationDetail() {
               <Database size={20} />
             </span>
             <div>
-              <h2 className="m-0 text-xl font-semibold">Connection Slots</h2>
-              <p className="m-0 text-sm text-slate-400">Bind source and target databases for this application.</p>
+              <h2 className="m-0 text-xl font-semibold">Databases</h2>
+              <p className="m-0 text-sm text-slate-400">Pick the source and destination databases for this migration.</p>
             </div>
           </div>
 
@@ -292,17 +305,17 @@ export default function ApplicationDetail() {
                           </div>
                         </>
                       ) : (
-                        <div className="mt-3 text-sm font-semibold text-slate-500">Not Bound</div>
+                        <div className="mt-3 text-sm font-semibold text-slate-500">Not set</div>
                       )}
                     </div>
                     {connection ? (
                       <button className="btn btn-secondary px-3 text-sm" onClick={() => handleUnassignSlot(slot.key)}>
                         <Unlink size={15} />
-                        Unassign
+                        Remove
                       </button>
                     ) : (
                       <button className="btn px-3 text-sm" onClick={() => openAssign(slot.key)}>
-                        Assign
+                        Choose
                       </button>
                     )}
                   </div>
@@ -316,16 +329,16 @@ export default function ApplicationDetail() {
       {bindingSlot && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
           <div className="card w-full max-w-md">
-            <h3 className="m-0 text-xl font-semibold">Assign Connection Slot</h3>
+            <h3 className="m-0 text-xl font-semibold">Choose a database</h3>
             <p className="mt-2 text-sm text-slate-400">
-              Select a matching database profile for <strong>{bindingSlot.replace('_', ' ')}</strong>.
+              Pick the database to use as <strong>{slotLabel(bindingSlot)}</strong>.
             </p>
             <select
               className="input mt-5"
               value={selectedConnId}
               onChange={(event) => setSelectedConnId(Number(event.target.value))}
             >
-              <option value="">Select connection profile</option>
+              <option value="">Select a database</option>
               {connections
                 .filter((connection) => connection.kind === slots.find((slot) => slot.key === bindingSlot)?.kind)
                 .map((connection) => (
@@ -337,7 +350,7 @@ export default function ApplicationDetail() {
             <div className="mt-6 flex justify-end gap-3">
               <button className="btn btn-secondary" onClick={() => setBindingSlot(null)}>Cancel</button>
               <button className="btn" onClick={handleAssignSlot} disabled={!selectedConnId || savingBinding}>
-                {savingBinding ? 'Assigning...' : 'Assign'}
+                {savingBinding ? 'Saving...' : 'Use this database'}
               </button>
             </div>
           </div>
@@ -347,29 +360,35 @@ export default function ApplicationDetail() {
       {showGenModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
           <div className="card w-full max-w-lg">
-            <h3 className="m-0 text-xl font-semibold">Auto-Generate Manifest</h3>
+            <h3 className="m-0 text-xl font-semibold">Find tables automatically</h3>
             <p className="mt-2 text-sm text-slate-400">
-              Discover Oracle tables and build a migration manifest for the selected owner/schema.
+              Scan the source database and build a table selection from one of its schemas.
             </p>
             <form onSubmit={handleGenerateManifest} className="mt-5 flex flex-col gap-4">
               <div>
-                <label className="label">Oracle Discovery Connection</label>
-                <select className="input" value={genConnId} onChange={(event) => setGenConnId(Number(event.target.value))} required>
-                  <option value="">Select Oracle profile</option>
+                <label className="label" htmlFor="gen-source-db">Source database to scan</label>
+                <select id="gen-source-db" className="input" value={genConnId} onChange={(event) => setGenConnId(Number(event.target.value))} required>
+                  <option value="">Select a source database</option>
                   {oracleConnections.map((connection) => (
                     <option key={connection.id} value={connection.id}>{connection.name}</option>
                   ))}
                 </select>
               </div>
               <div>
-                <label className="label">Oracle Schema / Owner</label>
-                <input className="input" value={genOwner} onChange={(event) => setGenOwner(event.target.value.toUpperCase())} placeholder="HR" required />
+                <label className="label" htmlFor="gen-source-schema">Source schema</label>
+                <SchemaCombobox
+                  id="gen-source-schema"
+                  size="md"
+                  connectionId={genConnId}
+                  value={genOwner}
+                  onChange={setGenOwner}
+                />
               </div>
               <div className="flex justify-end gap-3 pt-2">
                 <button type="button" className="btn btn-secondary" onClick={() => setShowGenModal(false)}>Cancel</button>
                 <button type="submit" className="btn" disabled={genLoading || !genConnId || !genOwner.trim()}>
                   {genLoading ? <RefreshCw size={16} className="spin" /> : <Wand2 size={16} />}
-                  Generate
+                  Find tables
                 </button>
               </div>
             </form>
@@ -382,41 +401,53 @@ export default function ApplicationDetail() {
           <div className="card w-full max-w-xl">
             <h3 className="m-0 flex items-center gap-2 text-xl font-semibold">
               <Play size={20} className="text-emerald-300" />
-              Launch Migration Job
+              Start a run
             </h3>
+            {/* whitespace-pre-line: a failed readiness check lists one line per check. */}
             {launchError && (
-              <div className="mt-4 rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-200">
+              <div className="mt-4 whitespace-pre-line rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-200">
                 {launchError}
               </div>
             )}
             <form onSubmit={handleLaunchJob} className="mt-5 flex flex-col gap-4">
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div>
-                  <label className="label">Source Slot</label>
+                  <label className="label">Copy from</label>
                   <select className="input" value={sourceSlot} onChange={(event) => setSourceSlot(event.target.value)}>
-                    <option value="oracle_test">Oracle Test</option>
-                    <option value="oracle_live">Oracle Live</option>
+                    {SLOTS.filter((s) => s.kind === 0).map((s) => (
+                      <option key={s.key} value={s.key}>{s.label}</option>
+                    ))}
                   </select>
                 </div>
                 <div>
-                  <label className="label">Target Slot</label>
+                  <label className="label">Copy to</label>
                   <select className="input" value={targetSlot} onChange={(event) => setTargetSlot(event.target.value)}>
-                    <option value="pg_test">Postgres Test</option>
-                    <option value="pg_live">Postgres Live</option>
+                    {SLOTS.filter((s) => s.kind === 1).map((s) => (
+                      <option key={s.key} value={s.key}>{s.label}</option>
+                    ))}
                   </select>
                 </div>
               </div>
               <div>
-                <label className="label">Target Postgres Schema</label>
-                <input className="input" value={targetSchema} onChange={(event) => setTargetSchema(event.target.value)} required />
+                <label className="label" htmlFor="run-target-schema">Destination schema</label>
+                <SchemaCombobox
+                  id="run-target-schema"
+                  size="md"
+                  variant="postgres"
+                  connectionId={targetConnectionId}
+                  value={targetSchema}
+                  onChange={setTargetSchema}
+                />
               </div>
-              {targetSlot === 'pg_live' && (
+              {targetSlot.endsWith('live') && (
                 <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4">
                   <div className="flex items-center gap-2 text-sm font-semibold text-amber-200">
                     <ShieldAlert size={18} />
-                    Live target selected
+                    You are copying into a live database
                   </div>
-                  <p className="mt-2 text-sm text-slate-300">Type RUN LIVE MIGRATION to continue.</p>
+                  <p className="mt-2 text-sm text-slate-300">
+                    Type <strong className="font-mono">{livePhrase}</strong> to continue.
+                  </p>
                   <input className="input mt-3" value={confirmPhrase} onChange={(event) => setConfirmPhrase(event.target.value)} />
                 </div>
               )}
@@ -424,7 +455,7 @@ export default function ApplicationDetail() {
                 <button type="button" className="btn btn-secondary" onClick={() => { setRunningManifest(null); setLaunchError(null); }}>Cancel</button>
                 <button type="submit" className="btn bg-emerald-600" disabled={launchLoading || oracleConnections.length === 0 || pgConnections.length === 0}>
                   {launchLoading ? <RefreshCw size={16} className="spin" /> : <Play size={16} />}
-                  Launch Migration
+                  Start run
                 </button>
               </div>
             </form>

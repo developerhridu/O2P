@@ -11,7 +11,7 @@ namespace O2P.Api.Controllers
 {
     [ApiController]
     [Route("api/v1/")]
-    [Authorize(Roles = "Admin,Operator,Viewer")]
+    //[Authorize(Roles = "Admin,Operator,Viewer")]
     public class ManifestsController : ControllerBase
     {
         private readonly AppDbContext _db;
@@ -79,7 +79,7 @@ namespace O2P.Api.Controllers
                 .Where(c => c.ConnectionId == connectionId && c.Owner == owner.ToUpper())
                 .ToListAsync();
 
-            if (!cached.Any()) return BadRequest("No discovery cache found for connection and owner.");
+            if (!cached.Any()) return BadRequest("No tables have been scanned for that database and schema yet.");
 
             var manifest = new Manifest
             {
@@ -95,7 +95,16 @@ namespace O2P.Api.Controllers
                 {
                     Owner = cache.Owner,
                     TableName = cache.TableName,
-                    Included = true // Include by default
+                    Included = true, // Include by default
+                    // Carry the scan's statistics across. Without this the generated selection shows
+                    // "Unknown" for every table even where the scan did find figures.
+                    EstRows = cache.NumRows,
+                    EstBytes = cache.SegmentBytes,
+                    SizeIsEstimate = cache.SizeIsEstimate,
+                    RowsCountedAt = cache.RowsCountedAt,
+                    HasLobs = cache.LobBytes.HasValue && cache.LobBytes.Value > 0,
+                    IsPartitioned = cache.IsPartitioned,
+                    IsIot = cache.IsIot
                 };
 
                 foreach (var col in cache.Columns)

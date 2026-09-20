@@ -9,23 +9,35 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.IdentityModel.Tokens;
+using Microsoft.OpenApi.Models;
 using O2P.Infrastructure.Metadata;
 using O2P.Infrastructure.Oracle;
 using O2P.Infrastructure.Postgres;
 using O2P.Application;
 using Serilog;
+using System.IO;
 using System.Text;
 using System.Threading.RateLimiting;
 using System.Security.Claims;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Configure Serilog
+// Configure Serilog (console + rolling file under repo logs/)
 builder.Host.UseSerilog((context, config) =>
 {
+    var logDir = Path.GetFullPath(Path.Combine(context.HostingEnvironment.ContentRootPath, "..", "..", "logs"));
+    Directory.CreateDirectory(logDir);
+
     config.ReadFrom.Configuration(context.Configuration)
           .Enrich.FromLogContext()
-          .WriteTo.Console();
+          .Enrich.WithProperty("Application", "O2P.Api")
+          .WriteTo.Console()
+          .WriteTo.File(
+              path: Path.Combine(logDir, "o2p-api-.log"),
+              rollingInterval: RollingInterval.Day,
+              retainedFileCountLimit: 14,
+              shared: true,
+              outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] ({Application}) {Message:lj}{NewLine}{Exception}");
 });
 
 // Add Metadata Infrastructure (EF Core, Identity, Data Protection)
@@ -45,6 +57,8 @@ var corsOrigins = securitySection.GetSection("Cors:AllowedOrigins").Get<string[]
     "http://127.0.0.1:3000",
     "http://localhost:3051",
     "http://127.0.0.1:3051",
+    "http://localhost:5151",
+    "http://127.0.0.1:5151",
     "http://27.147.159.194:3051"
 };
 
@@ -127,7 +141,39 @@ builder.Services.AddControllers(options =>
     options.Filters.Add(new AuthorizeFilter(policy));
 });
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.AddSwaggerGen(options =>
+{
+    options.SwaggerDoc("v1", new OpenApiInfo
+    {
+        Title = "O2P API",
+        Version = "v1",
+        Description = "Oracle to PostgreSQL migration control plane"
+    });
+    options.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+    {
+        Name = "Authorization",
+        Type = SecuritySchemeType.Http,
+        Scheme = "bearer",
+        BearerFormat = "JWT",
+        In = ParameterLocation.Header,
+        Description = "Paste the JWT from POST /api/v1/auth/login (Authorize value: the token only)."
+    });
+    options.AddSecurityRequirement(new OpenApiSecurityRequirement
+    {
+        {
+            new OpenApiSecurityScheme
+            {
+                Reference = new OpenApiReference
+                {
+                    Type = ReferenceType.SecurityScheme,
+                    Id = "Bearer"
+                }
+            },
+            Array.Empty<string>()
+        }
+    });
+});
+builder.Services.AddHostedService<O2P.Api.MetadataDbInitializerHostedService>();
 
 // Enable CORS for React frontend
 builder.Services.AddCors(options =>
@@ -138,124 +184,34 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
-// Seed Identity Roles and Admin User
-using (var scope = app.Services.CreateScope())
-{
-    var services = scope.ServiceProvider;
-    try
-    {
-        var roleManager = services.GetRequiredService<Microsoft.AspNetCore.Identity.RoleManager<O2P.Domain.Entities.ApplicationRole>>();
-        var userManager = services.GetRequiredService<Microsoft.AspNetCore.Identity.UserManager<O2P.Domain.Entities.ApplicationUser>>();
-        var db = services.GetRequiredService<AppDbContext>();
-        var secretProtector = services.GetRequiredService<O2P.Application.Interfaces.ISecretProtector>();
-        var config = services.GetRequiredService<IConfiguration>();
-        var logger = services.GetRequiredService<Microsoft.Extensions.Logging.ILogger<Program>>();
-
-        for (var attempt = 1; attempt <= 30; attempt++)
-        {
-            try
-            {
-                await db.Database.MigrateAsync();
-                break;
-            }
-            catch when (attempt < 30)
-            {
-                await Task.Delay(TimeSpan.FromSeconds(2));
-            }
-        }
-
-        var roles = new[] { "Admin", "Operator", "Viewer" };
-        foreach (var roleName in roles)
-        {
-            var roleExists = await roleManager.RoleExistsAsync(roleName);
-            if (!roleExists)
-            {
-                await roleManager.CreateAsync(new O2P.Domain.Entities.ApplicationRole { Name = roleName });
-            }
-        }
-
-        var bootstrapAdmin = config.GetSection("BootstrapAdmin");
-        var bootstrapUsername = bootstrapAdmin["Username"] ?? "admin";
-        var bootstrapEmail = bootstrapAdmin["Email"] ?? "admin@o2p.internal";
-        var bootstrapPassword = bootstrapAdmin["Password"];
-        var effectiveBootstrapPassword = string.IsNullOrWhiteSpace(bootstrapPassword)
-            ? "AdminPassword123!"
-            : bootstrapPassword;
-
-        var adminUser = await userManager.FindByNameAsync(bootstrapUsername);
-        if (adminUser == null)
-        {
-            adminUser = new O2P.Domain.Entities.ApplicationUser
-            {
-                UserName = bootstrapUsername,
-                Email = bootstrapEmail,
-                DisplayName = "O2P Administrator",
-                EmailConfirmed = true,
-                LockoutEnabled = true,
-                IsActive = true,
-                MustChangePassword = true,
-                LastPasswordChangedAt = DateTimeOffset.UtcNow
-            };
-            var createAdminResult = await userManager.CreateAsync(adminUser, effectiveBootstrapPassword);
-            if (createAdminResult.Succeeded)
-            {
-                await userManager.AddToRoleAsync(adminUser, "Admin");
-            }
-        }
-        else
-        {
-            var usedDefaultBootstrapPassword = effectiveBootstrapPassword == "AdminPassword123!";
-            if (usedDefaultBootstrapPassword)
-            {
-                adminUser.MustChangePassword = true;
-                await userManager.UpdateAsync(adminUser);
-                logger.LogWarning("Bootstrap admin is using the default fallback password. Set BootstrapAdmin__Password or O2P_ADMIN_PASSWORD immediately for public deployments.");
-            }
-            else if (await userManager.CheckPasswordAsync(adminUser, "AdminPassword123!"))
-            {
-                var resetToken = await userManager.GeneratePasswordResetTokenAsync(adminUser);
-                var resetResult = await userManager.ResetPasswordAsync(adminUser, resetToken, effectiveBootstrapPassword);
-                if (resetResult.Succeeded)
-                {
-                    adminUser.MustChangePassword = true;
-                    adminUser.LastPasswordChangedAt = DateTimeOffset.UtcNow;
-                    await userManager.UpdateSecurityStampAsync(adminUser);
-                    await userManager.UpdateAsync(adminUser);
-                    logger.LogInformation("Bootstrap admin password rotated away from the default seed password.");
-                }
-            }
-        }
-
-        var connections = db.Connections.Where(c => c.SecretCiphertext != null).ToList();
-        foreach (var connection in connections)
-        {
-            if (!secretProtector.IsProtected(connection.SecretCiphertext))
-            {
-                var legacyPassword = secretProtector.Unprotect(connection.SecretCiphertext);
-                connection.SecretCiphertext = secretProtector.Protect(legacyPassword);
-                connection.UpdatedAt = DateTimeOffset.UtcNow;
-                db.RunEvents.Add(new O2P.Domain.Entities.RunEvent
-                {
-                    Actor = "system",
-                    Event = "connection.secret_backfilled",
-                    DetailJson = $"{{\"connectionId\":{connection.Id}}}",
-                    At = DateTimeOffset.UtcNow
-                });
-            }
-        }
-        await db.SaveChangesAsync();
-    }
-    catch (System.Exception ex)
-    {
-        var logger = services.GetRequiredService<Microsoft.Extensions.Logging.ILogger<Program>>();
-        logger.LogError(ex, "An error occurred while seeding the database.");
-    }
-}
-
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
-    app.UseSwaggerUI();
+    app.UseSwaggerUI(options =>
+    {
+        options.SwaggerEndpoint("/swagger/v1/swagger.json", "O2P API v1");
+        options.RoutePrefix = "swagger";
+    });
+
+    app.Lifetime.ApplicationStarted.Register(() =>
+    {
+        const string swaggerUrl = "http://localhost:5000/swagger";
+        Log.Information("Swagger UI available at {SwaggerUrl}", swaggerUrl);
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "cmd.exe",
+                Arguments = $"/c start \"\" \"{swaggerUrl}\"",
+                CreateNoWindow = true,
+                UseShellExecute = false
+            });
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Failed to open Swagger in the browser. Open {SwaggerUrl} manually.", swaggerUrl);
+        }
+    });
 }
 
 app.UseForwardedHeaders();
@@ -279,10 +235,19 @@ app.Use(async (context, next) =>
 
 app.UseCors("Frontend");
 app.UseRateLimiter();
+app.UseSerilogRequestLogging();
 
 app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
 
-app.Run();
+try
+{
+    Log.Information("O2P.Api starting; file logs under ../../logs/o2p-api-*.log");
+    app.Run();
+}
+finally
+{
+    Log.CloseAndFlush();
+}

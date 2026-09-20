@@ -5,10 +5,18 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UserSecretsId>dotnet-O2P.Worker-c3e6b72e-03b8-4b9d-9796-472c79b758dd</UserSecretsId>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <!-- Debug builds auto-stop a running Worker so VS/dotnet can overwrite locked DLLs. -->
+    <StopRunningWorkerOnBuild Condition="'$(StopRunningWorkerOnBuild)' == '' and '$(Configuration)' == 'Debug' and '$(ContinuousIntegrationBuild)' != 'true'">true</StopRunningWorkerOnBuild>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
+    <PackageReference Include="Oracle.ManagedDataAccess.Core" Version="23.26.200" />
+    <PackageReference Include="Serilog.Extensions.Hosting" Version="8.0.0" />
+    <PackageReference Include="Serilog.Settings.Configuration" Version="8.0.4" />
+    <PackageReference Include="Serilog.Sinks.Console" Version="5.0.0" />
+    <PackageReference Include="Serilog.Sinks.File" Version="5.0.0" />
   </ItemGroup>
 
   <ItemGroup>
@@ -17,4 +25,28 @@
     <ProjectReference Include="..\O2P.Infrastructure.Oracle\O2P.Infrastructure.Oracle.csproj" />
     <ProjectReference Include="..\O2P.Infrastructure.Postgres\O2P.Infrastructure.Postgres.csproj" />
   </ItemGroup>
+
+  <!-- Stop any running Worker before build so bin DLLs are not locked (MSB3027). -->
+  <Target Name="StopRunningWorkerBeforeBuild" BeforeTargets="BeforeBuild" Condition="'$(StopRunningWorkerOnBuild)' == 'true'">
+    <Message Importance="high" Text="Stopping running O2P.Worker processes so build can overwrite output DLLs..." />
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;$ErrorActionPreference='SilentlyContinue'; Get-Process -Name 'O2P.Worker' | Stop-Process -Force; Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'O2P\\.Worker(\\.dll|\\.exe|\\\\O2P\\.Worker)' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }; Start-Sleep -Milliseconds 400; exit 0&quot;"
+          IgnoreExitCode="true"
+          StandardOutputImportance="low"
+          StandardErrorImportance="low" />
+  </Target>
+
+  <!-- Ensure Oracle driver is always next to O2P.Worker.exe (transitive copy is unreliable here). -->
+  <Target Name="EnsureOracleManagedDataAccess" AfterTargets="Build">
+    <PropertyGroup>
+      <_OracleOut>$(OutputPath)Oracle.ManagedDataAccess.dll</_OracleOut>
+      <_OraclePkg Condition="'$(NuGetPackageRoot)' != ''">$(NuGetPackageRoot)oracle.manageddataaccess.core\23.26.200\lib\net8.0\Oracle.ManagedDataAccess.dll</_OraclePkg>
+      <_OracleUser>$(USERPROFILE)\.nuget\packages\oracle.manageddataaccess.core\23.26.200\lib\net8.0\Oracle.ManagedDataAccess.dll</_OracleUser>
+      <_OracleApi>$(MSBuildThisFileDirectory)..\O2P.Api\bin\$(Configuration)\net8.0\Oracle.ManagedDataAccess.dll</_OracleApi>
+      <_OracleSrc Condition="Exists('$(_OraclePkg)')">$(_OraclePkg)</_OracleSrc>
+      <_OracleSrc Condition="'$(_OracleSrc)' == '' and Exists('$(_OracleUser)')">$(_OracleUser)</_OracleSrc>
+      <_OracleSrc Condition="'$(_OracleSrc)' == '' and Exists('$(_OracleApi)')">$(_OracleApi)</_OracleSrc>
+    </PropertyGroup>
+    <Copy SourceFiles="$(_OracleSrc)" DestinationFiles="$(_OracleOut)" SkipUnchangedFiles="false" Condition="'$(_OracleSrc)' != ''" />
+    <Error Text="Oracle.ManagedDataAccess.dll missing from Worker output after build. Checked NuGetPackageRoot, user .nuget, and Api bin." Condition="!Exists('$(_OracleOut)')" />
+  </Target>
 </Project>

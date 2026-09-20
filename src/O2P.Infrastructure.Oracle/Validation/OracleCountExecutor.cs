@@ -11,6 +11,13 @@ namespace O2P.Infrastructure.Oracle.Validation
     {
         public async Task<long> GetRowCountAsync(Connection sourceConnection, string password, string owner, string tableName, string? whereClause, CancellationToken cancellationToken)
         {
+            if (sourceConnection.Host.Equals("mock", StringComparison.OrdinalIgnoreCase))
+            {
+                // Same counts the mock discovery reports, so a mock scan and a mock count agree.
+                await Task.Yield();
+                return tableName.Equals("ORDERS", StringComparison.OrdinalIgnoreCase) ? 4500 : 1500;
+            }
+
             var oracleCsb = new OracleConnectionStringBuilder
             {
                 DataSource = $"{sourceConnection.Host}:{sourceConnection.Port}/{sourceConnection.ServiceOrDb}",

@@ -4,12 +4,14 @@ using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using O2P.Application.Core;
 using O2P.Application.Interfaces;
+using O2P.Application.Schema;
 using O2P.Domain.Entities;
 using O2P.Infrastructure.Metadata;
 using O2P.Worker.Core;
@@ -22,15 +24,22 @@ namespace O2P.Worker
         private readonly IServiceProvider _serviceProvider;
         private readonly GlobalGovernor _governor;
         private readonly IHostApplicationLifetime _lifetime;
+        private readonly IConfiguration _configuration;
         private readonly TokenBucketRateLimiter _rateLimiter = new TokenBucketRateLimiter(50000, 10000);
         private DateTimeOffset _workerStartedAt;
 
-        public Worker(ILogger<Worker> logger, IServiceProvider serviceProvider, GlobalGovernor governor, IHostApplicationLifetime lifetime)
+        public Worker(
+            ILogger<Worker> logger,
+            IServiceProvider serviceProvider,
+            GlobalGovernor governor,
+            IHostApplicationLifetime lifetime,
+            IConfiguration configuration)
         {
             _logger = logger;
             _serviceProvider = serviceProvider;
             _governor = governor;
             _lifetime = lifetime;
+            _configuration = configuration;
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -38,16 +47,21 @@ namespace O2P.Worker
             _workerStartedAt = DateTimeOffset.UtcNow;
             _logger.LogInformation("Worker running at: {time}", DateTimeOffset.Now);
 
-            // Start command poller
+            // Previous process may have died while chunks were Status=Running with heartbeats
+            // still "valid". Requeue them so work can resume after a restart.
+            await RequeueOrphanedRunningChunksAsync(stoppingToken);
+
+            // Command poller + job prep must NOT share the chunk-worker slot acquire path.
+            // Previously Recover/Prepare ran in the same loop as AcquireWorkerSlotAsync; when all
+            // slots were held by hung chunk tasks, Queued jobs never started and leases never
+            // recovered — jobs looked "stuck / not checked".
             _ = Task.Run(() => PollCommandsAsync(stoppingToken), stoppingToken);
+            _ = Task.Run(() => PrepLoopAsync(stoppingToken), stoppingToken);
 
             while (!stoppingToken.IsCancellationRequested)
             {
                 try
                 {
-                    await RecoverExpiredLeasesAsync(stoppingToken);
-                    await PrepareQueuedJobsAsync(stoppingToken);
-
                     // Block until a slot is available
                     var lease = await _governor.AcquireWorkerSlotAsync(stoppingToken);
                     
@@ -76,13 +90,97 @@ namespace O2P.Worker
                 catch (OperationCanceledException) { }
                 catch (Exception ex)
                 {
-                    // A transient failure in the control loop (e.g. a brief metadata-DB blip in
-                    // RecoverExpiredLeasesAsync/PrepareQueuedJobsAsync) must never take the whole
-                    // Worker down - log it and keep polling after a short backoff. Previously any
-                    // such exception escaped ExecuteAsync and stopped the BackgroundService (host).
-                    _logger.LogError(ex, "Worker control loop iteration failed; backing off and retrying.");
+                    _logger.LogError(ex, "Worker chunk-dispatch loop failed; backing off and retrying.");
                     try { await Task.Delay(2000, stoppingToken); }
                     catch (OperationCanceledException) { }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Periodically recovers expired chunk leases and starts Queued jobs. Runs independently of
+        /// chunk-worker slot saturation so a full/hung worker pool cannot starve job pickup.
+        /// </summary>
+        private async Task PrepLoopAsync(CancellationToken stoppingToken)
+        {
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                try
+                {
+                    await RecoverExpiredLeasesAsync(stoppingToken);
+                    await PrepareQueuedJobsAsync(stoppingToken);
+                }
+                catch (OperationCanceledException) { return; }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Worker prep loop iteration failed; backing off and retrying.");
+                }
+
+                try { await Task.Delay(2000, stoppingToken); }
+                catch (OperationCanceledException) { return; }
+            }
+        }
+
+        private async Task RequeueOrphanedRunningChunksAsync(CancellationToken cancellationToken)
+        {
+            using var scope = _serviceProvider.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var requeued = await db.ChunkLogs
+                .Where(c => c.Status == "Running")
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(c => c.Status, "Pending")
+                    .SetProperty(c => c.WorkerId, (string?)null)
+                    .SetProperty(c => c.LeaseExpiresAt, (DateTimeOffset?)null)
+                    .SetProperty(c => c.StartedAt, (DateTimeOffset?)null), cancellationToken);
+
+            if (requeued > 0)
+            {
+                _logger.LogWarning("Requeued {Count} orphaned Running chunk(s) after worker start.", requeued);
+            }
+
+            // Chunks failed only because QuoteOracle rejected leading-underscore names (e.g. "_DATE").
+            // After the identifier fix, put them back in the queue so the table can finish.
+            var identifierFails = await db.ChunkLogs
+                .Where(c => c.Status == "Failed" && c.ErrorMessage != null && c.ErrorMessage.Contains("Unsafe Oracle identifier"))
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(c => c.Status, "Pending")
+                    .SetProperty(c => c.ErrorMessage, (string?)null)
+                    .SetProperty(c => c.WorkerId, (string?)null)
+                    .SetProperty(c => c.LeaseExpiresAt, (DateTimeOffset?)null)
+                    .SetProperty(c => c.CompletedAt, (DateTimeOffset?)null), cancellationToken);
+
+            if (identifierFails > 0)
+            {
+                _logger.LogWarning("Requeued {Count} chunk(s) that failed on Unsafe Oracle identifier.", identifierFails);
+
+                // Claim SQL only picks chunks on Loading tables under Running jobs.
+                var tableIds = await db.ChunkLogs
+                    .Where(c => c.Status == "Pending")
+                    .Select(c => c.TableRunId)
+                    .Distinct()
+                    .ToListAsync(cancellationToken);
+
+                if (tableIds.Count > 0)
+                {
+                    await db.TableRuns
+                        .Where(t => tableIds.Contains(t.Id) && (t.Status == "Failed" || t.Status == "Completed" || t.Status == "CompletedWithErrors"))
+                        .ExecuteUpdateAsync(s => s
+                            .SetProperty(t => t.Status, "Loading")
+                            .SetProperty(t => t.ErrorMessage, (string?)null)
+                            .SetProperty(t => t.CompletedAt, (DateTimeOffset?)null), cancellationToken);
+
+                    var jobIds = await db.TableRuns
+                        .Where(t => tableIds.Contains(t.Id))
+                        .Select(t => t.JobRunId)
+                        .Distinct()
+                        .ToListAsync(cancellationToken);
+
+                    await db.JobRuns
+                        .Where(j => jobIds.Contains(j.Id) &&
+                                    (j.Status == "Failed" || j.Status == "Completed" || j.Status == "CompletedWithErrors" || j.Status == "Paused"))
+                        .ExecuteUpdateAsync(s => s
+                            .SetProperty(j => j.Status, "Running")
+                            .SetProperty(j => j.CompletedAt, (DateTimeOffset?)null), cancellationToken);
                 }
             }
         }
@@ -139,6 +237,14 @@ RETURNING c.""Id"";";
 
             long rowsWritten = 0;
             bool chunkSucceeded = false;
+            var chunkTimeoutMinutes = Math.Max(1, _configuration.GetValue("Concurrency:ChunkTimeoutMinutes", 20));
+
+            // Absolute ceiling so a hung Oracle/PG call cannot occupy a worker slot forever.
+            // Heartbeats keep the DB lease alive while the process is running; without this
+            // CancelAfter, stalled chunks never fail and the pool looks "stuck".
+            using var chunkCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            chunkCts.CancelAfter(TimeSpan.FromMinutes(chunkTimeoutMinutes));
+            var chunkToken = chunkCts.Token;
 
             // Keep the chunk's lease fresh while it is actively processing. A large single chunk (e.g.
             // a big BLOB table with no parallel split) can run longer than the 10-minute lease; without
@@ -170,8 +276,8 @@ RETURNING c.""Id"";";
                 var sourceConn = pendingChunk.TableRun.JobRun.Application.Connections.First(c => c.Slot == pendingChunk.TableRun.JobRun.SourceSlot).ConnectionId;
                 var targetConn = pendingChunk.TableRun.JobRun.Application.Connections.First(c => c.Slot == pendingChunk.TableRun.JobRun.TargetSlot).ConnectionId;
 
-                var oracleConnection = await db.Connections.FindAsync(new object[] { sourceConn }, cancellationToken);
-                var pgConnection = await db.Connections.FindAsync(new object[] { targetConn }, cancellationToken);
+                var oracleConnection = await db.Connections.FindAsync(new object[] { sourceConn }, chunkToken);
+                var pgConnection = await db.Connections.FindAsync(new object[] { targetConn }, chunkToken);
 
                 var oraclePassword = secretProtector.Unprotect(oracleConnection!.SecretCiphertext ?? new byte[0]);
                 var pgPassword = secretProtector.Unprotect(pgConnection!.SecretCiphertext ?? new byte[0]);
@@ -192,7 +298,7 @@ RETURNING c.""Id"";";
                     pendingChunk,
                     channel.Writer,
                     _rateLimiter,
-                    cancellationToken
+                    chunkToken
                 );
 
                 var writerTask = pgWriter.WriteDataAsync(
@@ -201,36 +307,67 @@ RETURNING c.""Id"";";
                     pendingChunk.TableRun.JobRun.TargetSchema,
                     pendingChunk.TableRun.TargetTableName,
                     pendingChunk.TableRun.ManifestTable.Columns.Where(c => !c.IsExcluded).OrderBy(c => c.Id).ToList(),
+                    pendingChunk.TableRun.TargetNameStyle,
                     pendingChunk.TableRun.JobRunId,
                     pendingChunk.TableRunId,
                     pendingChunk.ChunkIndex,
                     channel.Reader,
-                    cancellationToken
+                    chunkToken
                 );
 
                 await Task.WhenAll(readerTask, writerTask);
 
                 rowsWritten = writerTask.Result;
 
-                pendingChunk.Status = "Done";
-                pendingChunk.CompletedAt = DateTimeOffset.UtcNow;
-                pendingChunk.LeaseExpiresAt = null;
-                pendingChunk.RowsMigrated = rowsWritten;
-                chunkSucceeded = true;
-                _logger.LogInformation($"Successfully completed chunk {pendingChunk.Id}. Rows: {rowsWritten}");
+                // Only mark Done if still Running — a Cancel command may have set Cancelled mid-flight.
+                var markedDone = await db.ChunkLogs
+                    .Where(c => c.Id == pendingChunk.Id && c.Status == "Running")
+                    .ExecuteUpdateAsync(s => s
+                        .SetProperty(c => c.Status, "Done")
+                        .SetProperty(c => c.CompletedAt, DateTimeOffset.UtcNow)
+                        .SetProperty(c => c.LeaseExpiresAt, (DateTimeOffset?)null)
+                        .SetProperty(c => c.RowsMigrated, rowsWritten)
+                        .SetProperty(c => c.ErrorMessage, (string?)null), CancellationToken.None);
+
+                chunkSucceeded = markedDone > 0;
+                if (chunkSucceeded)
+                {
+                    _logger.LogInformation($"Successfully completed chunk {pendingChunk.Id}. Rows: {rowsWritten}");
+                }
+                else
+                {
+                    _logger.LogWarning("Chunk {ChunkId} finished after cancel/lease change; not marking Done.", pendingChunk.Id);
+                }
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                _logger.LogError(
+                    "Chunk {ChunkId} timed out after {Minutes} minutes (stall watchdog).",
+                    pendingChunk.Id, chunkTimeoutMinutes);
+                await db.ChunkLogs
+                    .Where(c => c.Id == pendingChunk.Id && c.Status == "Running")
+                    .ExecuteUpdateAsync(s => s
+                        .SetProperty(c => c.Status, "Failed")
+                        .SetProperty(c => c.ErrorMessage,
+                            $"Chunk timed out after {chunkTimeoutMinutes} minutes with no completion and was stopped. Use Retry failed to try it again.")
+                        .SetProperty(c => c.LeaseExpiresAt, (DateTimeOffset?)null)
+                        .SetProperty(c => c.CompletedAt, DateTimeOffset.UtcNow), CancellationToken.None);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, $"Chunk {pendingChunk.Id} failed.");
-                pendingChunk.Status = "Failed";
-                pendingChunk.ErrorMessage = ex.Message;
-                pendingChunk.LeaseExpiresAt = null;
+                await db.ChunkLogs
+                    .Where(c => c.Id == pendingChunk.Id && c.Status == "Running")
+                    .ExecuteUpdateAsync(s => s
+                        .SetProperty(c => c.Status, "Failed")
+                        .SetProperty(c => c.ErrorMessage, ex.Message)
+                        .SetProperty(c => c.LeaseExpiresAt, (DateTimeOffset?)null)
+                        .SetProperty(c => c.CompletedAt, DateTimeOffset.UtcNow), CancellationToken.None);
             }
             finally
             {
                 leaseCts.Cancel();
                 try { await leaseHeartbeat; } catch { /* heartbeat cancellation is expected */ }
-                await db.SaveChangesAsync(cancellationToken);
             }
 
             // Roll the completed chunk's row count up to its parent table run with an atomic,
@@ -241,11 +378,11 @@ RETURNING c.""Id"";";
             {
                 await db.TableRuns
                     .Where(t => t.Id == pendingChunk.TableRunId)
-                    .ExecuteUpdateAsync(s => s.SetProperty(t => t.RowsMigrated, t => t.RowsMigrated + rowsWritten), cancellationToken);
+                    .ExecuteUpdateAsync(s => s.SetProperty(t => t.RowsMigrated, t => t.RowsMigrated + rowsWritten), CancellationToken.None);
             }
 
             // Evaluate table-run (and job) completion now that this chunk reached a terminal state.
-            _ = Task.Run(() => CheckAndRunValidationAsync(pendingChunk.TableRunId, cancellationToken), cancellationToken);
+            _ = Task.Run(() => CheckAndRunValidationAsync(pendingChunk.TableRunId, CancellationToken.None), CancellationToken.None);
 
             return true;
         }
@@ -310,12 +447,26 @@ RETURNING c.""Id"";";
                 if (hasFailedChunks)
                 {
                     // Atomically claim the Loading -> Failed transition so only one caller acts.
-                    await db.TableRuns
+                    var failedClaimed = await db.TableRuns
                         .Where(t => t.Id == tableRunId && t.Status == "Loading")
                         .ExecuteUpdateAsync(s => s
                             .SetProperty(t => t.Status, "Failed")
-                            .SetProperty(t => t.ErrorMessage, "One or more chunks failed. Use retry_failed to reprocess.")
+                            .SetProperty(t => t.ErrorMessage, "Some batches failed. Use Retry failed to copy them again.")
                             .SetProperty(t => t.CompletedAt, DateTimeOffset.UtcNow), cancellationToken);
+
+                    // Always restore constraints on load failure (even if another caller claimed Failed).
+                    // Truncate first so PK/UNIQUE can be recreated after partial COPY.
+                    var restoreError = await RestoreConstraintsForTableRunAsync(
+                        scope.ServiceProvider, db, tableRunId, cancellationToken, truncateBeforeRestore: true);
+                    if (restoreError != null && failedClaimed > 0)
+                    {
+                        await db.TableRuns
+                            .Where(t => t.Id == tableRunId)
+                            .ExecuteUpdateAsync(s => s.SetProperty(
+                                t => t.ErrorMessage,
+                                "Some batches failed, and the table constraints could not be put back: " + restoreError),
+                                cancellationToken);
+                    }
 
                     await CheckAndCompleteJobAsync(db, jobRunId, cancellationToken);
                     return;
@@ -342,6 +493,17 @@ RETURNING c.""Id"";";
 
                 try
                 {
+                    var restoreError = await RestoreConstraintsForTableRunAsync(scope.ServiceProvider, db, tableRunId, cancellationToken);
+                    if (restoreError != null)
+                    {
+                        tableRun.Status = "Failed";
+                        tableRun.ErrorMessage = $"The data copied, but the table constraints could not be put back: {restoreError}";
+                        tableRun.CompletedAt = DateTimeOffset.UtcNow;
+                        await db.SaveChangesAsync(cancellationToken);
+                        await CheckAndCompleteJobAsync(db, jobRunId, cancellationToken);
+                        return;
+                    }
+
                     var validator = scope.ServiceProvider.GetRequiredService<IValidationService>();
                     var sourceConnId = tableRun.JobRun.Application.Connections.First(c => c.Slot == tableRun.JobRun.SourceSlot).ConnectionId;
                     var targetConnId = tableRun.JobRun.Application.Connections.First(c => c.Slot == tableRun.JobRun.TargetSlot).ConnectionId;
@@ -364,7 +526,7 @@ RETURNING c.""Id"";";
                 {
                     _logger.LogError(ex, "Validation failed for table run {TableRunId}.", tableRunId);
                     tableRun.Status = "CompletedWithErrors";
-                    tableRun.ErrorMessage = $"Validation error: {ex.Message}";
+                    tableRun.ErrorMessage = $"The row count check could not run: {ex.Message}";
                     tableRun.CompletedAt = DateTimeOffset.UtcNow;
                     await db.SaveChangesAsync(cancellationToken);
                 }
@@ -374,6 +536,82 @@ RETURNING c.""Id"";";
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error checking or running validation.");
+            }
+        }
+
+        /// <summary>
+        /// Re-applies constraints suspended before COPY. On failure, truncates the target table
+        /// first so PK/UNIQUE can be recreated even after partial loads, then restores.
+        /// Returns an error message on failure, otherwise null.
+        /// </summary>
+        private async Task<string?> RestoreConstraintsForTableRunAsync(
+            IServiceProvider services,
+            AppDbContext db,
+            long tableRunId,
+            CancellationToken cancellationToken,
+            bool truncateBeforeRestore = false)
+        {
+            var tableRun = await db.TableRuns
+                .Include(t => t.JobRun).ThenInclude(j => j.Application).ThenInclude(a => a.Connections)
+                .FirstOrDefaultAsync(t => t.Id == tableRunId, cancellationToken);
+
+            if (tableRun == null) return null;
+
+            var snapshot = PostgresConstraintSnapshot.Deserialize(tableRun.ConstraintSnapshotJson);
+            if (snapshot == null || snapshot.Constraints.Count == 0) return null;
+
+            try
+            {
+                var targetConnId = tableRun.JobRun.Application.Connections
+                    .First(c => c.Slot == tableRun.JobRun.TargetSlot).ConnectionId;
+                var targetConn = await db.Connections.FindAsync(new object[] { targetConnId }, cancellationToken);
+                if (targetConn == null)
+                {
+                    return "Could not find the destination database to put the table constraints back.";
+                }
+
+                var secretProtector = services.GetRequiredService<ISecretProtector>();
+                var password = secretProtector.Unprotect(targetConn.SecretCiphertext ?? Array.Empty<byte>());
+                var constraintManager = services.GetRequiredService<IPostgresConstraintManager>();
+
+                if (truncateBeforeRestore)
+                {
+                    try
+                    {
+                        await constraintManager.TruncateAsync(
+                            targetConn, password, snapshot.SchemaName, snapshot.TableName, cancellationToken);
+                    }
+                    catch (Exception truncateEx)
+                    {
+                        _logger.LogWarning(truncateEx,
+                            "Truncate before constraint restore failed for table run {TableRunId}; continuing with restore attempt.",
+                            tableRunId);
+                    }
+                }
+
+                try
+                {
+                    await constraintManager.RestoreAsync(targetConn, password, snapshot, cancellationToken);
+                    return null;
+                }
+                catch (Exception restoreEx) when (!truncateBeforeRestore)
+                {
+                    // Partial load may block PK/UNIQUE — wipe rows then restore schema.
+                    _logger.LogWarning(restoreEx,
+                        "Constraint restore failed for table run {TableRunId}; truncating and retrying restore.",
+                        tableRunId);
+                    await constraintManager.TruncateAsync(
+                        targetConn, password, snapshot.SchemaName, snapshot.TableName, cancellationToken);
+                    await constraintManager.RestoreAsync(targetConn, password, snapshot, cancellationToken);
+                    return null;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "Failed to restore constraints for table run {TableRunId} ({Schema}.{Table}). Schema may be left without suspended constraints.",
+                    tableRunId, snapshot.SchemaName, snapshot.TableName);
+                return ex.Message;
             }
         }
 
@@ -440,28 +678,88 @@ RETURNING c.""Id"";";
                             if (cmd.Command == "launch" && job.Status == "Queued") job.Status = "Queued";
                             else if (cmd.Command == "pause") job.Status = "Paused";
                             else if (cmd.Command == "resume") job.Status = "Running";
-                            else if (cmd.Command == "cancel") job.Status = "Cancelled";
+                            else if (cmd.Command == "cancel")
+                            {
+                                job.Status = "Cancelled";
+                                job.CompletedAt = DateTimeOffset.UtcNow;
+
+                                // Stop further claims: cancel Pending/Running chunks for this job.
+                                var tableIdsForCancel = await db.TableRuns
+                                    .Where(t => t.JobRunId == job.Id)
+                                    .Select(t => t.Id)
+                                    .ToListAsync(cancellationToken);
+
+                                await db.ChunkLogs
+                                    .Where(c => tableIdsForCancel.Contains(c.TableRunId) &&
+                                                (c.Status == "Pending" || c.Status == "Running"))
+                                    .ExecuteUpdateAsync(s => s
+                                        .SetProperty(c => c.Status, "Cancelled")
+                                        .SetProperty(c => c.ErrorMessage, "Cancelled.")
+                                        .SetProperty(c => c.LeaseExpiresAt, (DateTimeOffset?)null)
+                                        .SetProperty(c => c.CompletedAt, DateTimeOffset.UtcNow), cancellationToken);
+
+                                var activeTables = await db.TableRuns
+                                    .Where(t => t.JobRunId == job.Id &&
+                                                (t.Status == "Creating" || t.Status == "Planning" || t.Status == "Loading" || t.Status == "Validating" || t.Status == "Pending"))
+                                    .Select(t => t.Id)
+                                    .ToListAsync(cancellationToken);
+
+                                foreach (var tableRunId in activeTables)
+                                {
+                                    var restoreError = await RestoreConstraintsForTableRunAsync(
+                                        scope.ServiceProvider, db, tableRunId, cancellationToken, truncateBeforeRestore: true);
+                                    await db.TableRuns
+                                        .Where(t => t.Id == tableRunId)
+                                        .ExecuteUpdateAsync(s => s
+                                            .SetProperty(t => t.Status, "Cancelled")
+                                            .SetProperty(t => t.CompletedAt, DateTimeOffset.UtcNow)
+                                            .SetProperty(t => t.ErrorMessage,
+                                                restoreError == null
+                                                    ? "Cancelled. The table constraints were put back."
+                                                    : "Cancelled, but the table constraints could not be put back: " + restoreError),
+                                            cancellationToken);
+                                }
+                            }
                             else if (cmd.Command == "retry_failed")
                             {
                                 await db.ChunkLogs
-                                    .Where(c => c.TableRun!.JobRunId == cmd.JobRunId && c.Status == "Failed")
+                                    .Where(c => c.TableRun!.JobRunId == cmd.JobRunId &&
+                                                (c.Status == "Failed" || c.Status == "Cancelled"))
                                     .ExecuteUpdateAsync(s => s
                                         .SetProperty(c => c.Status, "Pending")
                                         .SetProperty(c => c.ErrorMessage, (string?)null)
-                                        .SetProperty(c => c.LeaseExpiresAt, (DateTimeOffset?)null), cancellationToken);
+                                        .SetProperty(c => c.LeaseExpiresAt, (DateTimeOffset?)null)
+                                        .SetProperty(c => c.CompletedAt, (DateTimeOffset?)null)
+                                        .SetProperty(c => c.WorkerId, (string?)null), cancellationToken);
 
                                 // Table runs that failed during planning (e.g. a transient Oracle
                                 // connection timeout before any chunks were ever created) have no
                                 // chunk_logs rows to reset above - PrepareQueuedJobsAsync only picks
                                 // up tables still in "Pending", so put them back there too.
+                                // Also re-open Cancelled tables after a user Cancel + Retry.
                                 await db.TableRuns
-                                    .Where(t => t.JobRunId == cmd.JobRunId && t.Status == "Failed")
+                                    .Where(t => t.JobRunId == cmd.JobRunId &&
+                                                (t.Status == "Failed" || t.Status == "Cancelled" || t.Status == "CompletedWithErrors"))
                                     .ExecuteUpdateAsync(s => s
                                         .SetProperty(t => t.Status, "Pending")
                                         .SetProperty(t => t.ErrorMessage, (string?)null)
                                         .SetProperty(t => t.CompletedAt, (DateTimeOffset?)null), cancellationToken);
 
+                                // Tables that already have chunks should go back to Loading so claim
+                                // SQL can pick Pending chunks; tables with no chunks stay Pending for
+                                // re-planning via PrepareQueuedJobsAsync.
+                                var tableIdsWithChunks = await db.ChunkLogs
+                                    .Where(c => c.TableRun!.JobRunId == cmd.JobRunId)
+                                    .Select(c => c.TableRunId)
+                                    .Distinct()
+                                    .ToListAsync(cancellationToken);
+
+                                await db.TableRuns
+                                    .Where(t => tableIdsWithChunks.Contains(t.Id) && t.Status == "Pending")
+                                    .ExecuteUpdateAsync(s => s.SetProperty(t => t.Status, "Loading"), cancellationToken);
+
                                 job.Status = "Running";
+                                job.CompletedAt = null;
                             }
                         }
                     }
@@ -486,15 +784,39 @@ RETURNING c.""Id"";";
             var engine = scope.ServiceProvider.GetRequiredService<MigrationEngine>();
             var secretProtector = scope.ServiceProvider.GetRequiredService<ISecretProtector>();
 
+            // Queued jobs first; also pick Running jobs that still have Pending tables (Retry failed
+            // after a cancel/planning failure) so StartTableRunAsync can plan them.
             var job = await db.JobRuns
                 .Include(j => j.Application).ThenInclude(a => a.Connections)
                 .Include(j => j.TableRuns)
-                .Where(j => j.Status == "Queued")
-                .OrderBy(j => j.CreatedAt)
+                .Where(j => j.Status == "Queued"
+                    || (j.Status == "Running" && j.TableRuns.Any(t => t.Status == "Pending")))
+                .OrderBy(j => j.Status == "Queued" ? 0 : 1)
+                .ThenBy(j => j.CreatedAt)
                 .FirstOrDefaultAsync(cancellationToken);
 
             if (job == null)
             {
+                return;
+            }
+
+            // A run with no tables can never finish: a run is complete when its tables are, and it
+            // has none, so it would sit at "Running" forever. The API now refuses to create one, but
+            // runs queued before that rule existed are still in the database. Fail them plainly.
+            if (job.TableRuns.Count == 0)
+            {
+                _logger.LogWarning("Run {JobId} has no tables to copy; marking it Failed instead of leaving it Running.", job.Id);
+                job.Status = "Failed";
+                job.CompletedAt = DateTimeOffset.UtcNow;
+                db.RunEvents.Add(new RunEvent
+                {
+                    JobRunId = job.Id,
+                    Actor = "system",
+                    Event = "job.failed_no_tables",
+                    DetailJson = "{}",
+                    At = DateTimeOffset.UtcNow
+                });
+                await db.SaveChangesAsync(cancellationToken);
                 return;
             }
 
@@ -519,9 +841,12 @@ RETURNING c.""Id"";";
             var sourcePassword = secretProtector.Unprotect(sourceConn.SecretCiphertext);
             var targetPassword = secretProtector.Unprotect(targetConn.SecretCiphertext);
 
-            job.Status = "Running";
-            job.StartedAt ??= DateTimeOffset.UtcNow;
-            await db.SaveChangesAsync(cancellationToken);
+            if (job.Status == "Queued")
+            {
+                job.Status = "Running";
+                job.StartedAt ??= DateTimeOffset.UtcNow;
+                await db.SaveChangesAsync(cancellationToken);
+            }
 
             var tableRunIds = await db.TableRuns
                 .Where(t => t.JobRunId == job.Id && t.Status == "Pending")
@@ -551,9 +876,25 @@ RETURNING c.""Id"";";
                         table.CompletedAt = DateTimeOffset.UtcNow;
                         await db.SaveChangesAsync(cancellationToken);
                     }
+
+                    // Safety net: restore even if MigrationEngine catch already attempted it.
+                    var restoreError = await RestoreConstraintsForTableRunAsync(
+                        scope.ServiceProvider, db, tableRunId, cancellationToken, truncateBeforeRestore: true);
+                    if (restoreError != null && table != null)
+                    {
+                        table.ErrorMessage = $"{ex.Message} | The table constraints could not be put back: {restoreError}";
+                        await db.SaveChangesAsync(cancellationToken);
+                    }
+
                     _logger.LogError(ex, "Failed to prepare table run {TableRunId}", tableRunId);
                 }
             }
+
+            // A table that fails during prepare never gets a chunk, and chunk completion is the only
+            // other thing that settles a job. Without this, a job whose tables all fail preparation
+            // (a systematically mismatched target schema, say) would sit in Running forever. No-op
+            // unless every table has reached a terminal state.
+            await CheckAndCompleteJobAsync(db, job.Id, cancellationToken);
         }
 
         private async Task RecoverExpiredLeasesAsync(CancellationToken cancellationToken)

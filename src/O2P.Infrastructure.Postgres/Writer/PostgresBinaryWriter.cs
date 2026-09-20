@@ -16,7 +16,7 @@ namespace O2P.Infrastructure.Postgres.Writer
 {
     public class PostgresBinaryWriter : IPostgresBinaryWriter
     {
-        public async Task<long> WriteDataAsync(Connection connection, string password, string targetSchema, string targetTable, IReadOnlyList<ManifestColumn> columns, long jobRunId, long tableRunId, int chunkIndex, ChannelReader<object[]> inputChannel, CancellationToken cancellationToken)
+        public async Task<long> WriteDataAsync(Connection connection, string password, string targetSchema, string targetTable, IReadOnlyList<ManifestColumn> columns, string? targetNameStyle, long jobRunId, long tableRunId, int chunkIndex, ChannelReader<object[]> inputChannel, CancellationToken cancellationToken)
         {
             if (connection.Host.Equals("mock", System.StringComparison.OrdinalIgnoreCase))
             {
@@ -37,15 +37,20 @@ namespace O2P.Infrastructure.Postgres.Writer
                 Password = password,
                 Pooling = true,
                 MinPoolSize = 1,
-                MaxPoolSize = 100
+                MaxPoolSize = 100,
+                Timeout = 60,
+                CommandTimeout = 600
             };
 
             await using var conn = new NpgsqlConnection(csb.ConnectionString);
             await conn.OpenAsync(cancellationToken);
 
             var qualifiedTable = SqlIdentifier.QuotePostgresQualified(targetSchema, targetTable);
+            // Must stay the same projection, in the same order, as the Oracle SELECT the reader built:
+            // the rows arriving on the channel are positional, field i goes to copyColumns[i]. Only the
+            // spelling of each name differs between the two sides.
             var includedColumns = columns.Where(c => !c.IsExcluded).OrderBy(c => c.Id).ToList();
-            var copyColumns = string.Join(", ", includedColumns.Select(c => SqlIdentifier.QuotePostgres(c.ColumnName)));
+            var copyColumns = string.Join(", ", includedColumns.Select(c => SqlIdentifier.QuotePostgres(PostgresName.TargetColumn(c, targetNameStyle))));
 
             // Precompute the binary write plan per column. Oracle NUMBER/FLOAT come back from ODP.NET
             // as .NET decimal regardless of the target column type, so a decimal written with type

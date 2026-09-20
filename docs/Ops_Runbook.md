@@ -27,7 +27,17 @@ Metrics are emitted to the `MetricSamples` table every 2 seconds, providing:
 - Rows Migrated Per Second
 - Active Chunk Workers
 
-## 4. Preflight Validation
+## 4. Worker Health
+
+The Worker is the only process that copies data; while it is down, new runs stay `Queued`.
+- Each Worker writes a heartbeat row to `o2p.worker_heartbeats` every 10 seconds and deletes it on a clean stop.
+- `GET /api/v1/workers/status` (any signed-in user) reports `running`, `count`, `multiple` and each Worker's host, process id and last-seen time. A Worker not seen for 45 seconds counts as gone.
+- The Runs page shows the same status as a chip and a banner. `count` above 1 is a fault: run exactly one Worker.
+- A `Queued` run can be cancelled with no Worker running; the API applies the cancel immediately.
+- A run whose table selection has nothing ticked is refused at start (HTTP 400). Any such run created earlier is marked `Failed` by the Worker with the event `job.failed_no_tables`.
+- Starting the Worker: `dotnet run --project src/O2P.Worker` for development, `scripts/run-worker.ps1` on a server.
+
+## 5. Preflight Validation
 
 Always run the preflight check before starting a massive migration:
 `POST /api/v1/jobs/{id}/preflight`

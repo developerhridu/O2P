@@ -1,0 +1,612 @@
+/* ==========================================================================
+   Table-selection builder (ManifestBuilder / TableGrid)
+
+   Plain CSS on purpose. The global `select, textarea` rule in index.css is unlayered,
+   and unlayered CSS beats Tailwind's layered utilities, so utility classes on those two
+   elements are silently ignored. `.tb-*` classes (specificity 0,1,0) do win over the bare
+   element selector, which is what lets these controls be compact.
+   ========================================================================== */
+
+.tb-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 14px;
+  flex: 0 0 auto;
+}
+
+.tb-title-block {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.tb-back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  color: var(--text-secondary);
+  transition: background-color 160ms ease, color 160ms ease;
+}
+
+.tb-back:hover {
+  background: rgba(148, 163, 184, 0.12);
+  color: var(--text-primary);
+}
+
+.tb-title {
+  margin: 0;
+  font-size: 1.35rem;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+}
+
+.tb-title-input {
+  width: min(520px, 60vw);
+  padding: 2px 6px;
+  margin-left: -6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 1.35rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.tb-title-input:hover {
+  border-color: var(--border-glass);
+}
+
+.tb-title-input:focus {
+  outline: none;
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+}
+
+.tb-subtitle {
+  margin: 2px 0 0;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+
+.tb-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.tb-error {
+  flex: 0 0 auto;
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  border: 1px solid rgba(244, 63, 94, 0.3);
+  border-radius: 8px;
+  background: rgba(244, 63, 94, 0.1);
+  color: #fecdd3;
+  font-size: 0.875rem;
+}
+
+.tb-card {
+  flex: 0 0 auto;
+  margin-bottom: 12px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-glass);
+  border-radius: 12px;
+}
+
+.tb-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px 16px;
+  padding: 10px 14px;
+}
+
+.tb-toolbar + .tb-toolbar {
+  border-top: 1px solid var(--border-glass);
+}
+
+.tb-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tb-field-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+/* Compact controls, 36px tall. They deliberately override the global select/textarea padding. */
+.tb-select,
+.tb-input {
+  width: auto;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--border-glass);
+  border-radius: 8px;
+  background: #0b1220;
+  color: var(--text-primary);
+  font-size: 0.875rem;
+}
+
+.tb-select {
+  min-width: 190px;
+  padding-right: 8px;
+}
+
+.tb-input {
+  width: 170px;
+}
+
+.tb-select:focus,
+.tb-input:focus,
+.tb-textarea:focus,
+.tb-cell-input:focus {
+  outline: none;
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+}
+
+/* Width for the schema picker inside the toolbar's flex row. */
+.tb-schema-box {
+  width: 230px;
+  flex: none;
+}
+
+.tb-search {
+  position: relative;
+  flex: 1 1 260px;
+  min-width: 200px;
+  max-width: 520px;
+}
+
+.tb-search svg {
+  position: absolute;
+  left: 11px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-secondary);
+  pointer-events: none;
+}
+
+.tb-search .tb-input {
+  width: 100%;
+  padding-left: 34px;
+}
+
+.tb-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--border-glass);
+  border-radius: 8px;
+  background: rgba(148, 163, 184, 0.08);
+  color: #cbd5e1;
+  font-size: 0.875rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
+}
+
+.tb-btn:hover:not(:disabled) {
+  background: rgba(148, 163, 184, 0.16);
+  color: var(--text-primary);
+}
+
+.tb-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.tb-btn-primary {
+  background: linear-gradient(135deg, var(--accent-blue), #2563eb);
+  border-color: rgba(59, 130, 246, 0.45);
+  color: #fff;
+}
+
+.tb-btn-primary:hover:not(:disabled) {
+  background: linear-gradient(135deg, #4f8ff7, #2f6ff0);
+  color: #fff;
+}
+
+.tb-btn:focus-visible,
+.tb-seg button:focus-visible,
+.tb-sort:focus-visible,
+.tb-icon-btn:focus-visible,
+.tb-back:focus-visible {
+  outline: 2px solid var(--accent-blue);
+  outline-offset: 2px;
+}
+
+/* All / Selected / Unselected */
+.tb-seg {
+  display: inline-flex;
+  border: 1px solid var(--border-glass);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.tb-seg button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 12px;
+  border: 0;
+  border-right: 1px solid var(--border-glass);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.tb-seg button:last-child {
+  border-right: 0;
+}
+
+.tb-seg button:hover {
+  color: var(--text-primary);
+  background: rgba(148, 163, 184, 0.08);
+}
+
+.tb-seg button[aria-pressed="true"] {
+  background: rgba(59, 130, 246, 0.16);
+  color: #bfdbfe;
+}
+
+.tb-seg .tb-seg-count {
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  opacity: 0.8;
+}
+
+.tb-muted {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.tb-spacer {
+  margin-left: auto;
+}
+
+/* Add-tables popover */
+.tb-popover-wrap {
+  position: relative;
+}
+
+.tb-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 40;
+  width: min(440px, 88vw);
+  padding: 14px;
+  border: 1px solid var(--border-glass);
+  border-radius: 10px;
+  background: var(--bg-panel-soft);
+  box-shadow: var(--shadow-panel);
+}
+
+.tb-popover-title {
+  margin: 0 0 4px;
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.tb-popover-hint {
+  margin: 0 0 10px;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+}
+
+.tb-textarea {
+  min-height: 116px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-glass);
+  border-radius: 8px;
+  background: #0b1220;
+  color: var(--text-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.82rem;
+  resize: vertical;
+}
+
+.tb-popover-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+/* ---- Grid ---------------------------------------------------------------- */
+
+.tb-grid-card {
+  flex: 1 1 auto;
+  min-height: 0; /* lets the card shrink so .tb-scroll scrolls, rather than the page growing */
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-glass);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.tb-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  position: relative;
+}
+
+.tb-grid {
+  /* checkbox | schema | table | rows | size | large objects | row filter | remove
+     "Large objects" needs ~135px: it is upper-cased with letter-spacing in the header. */
+  --tb-cols: 44px 150px minmax(240px, 1fr) 130px 100px 140px minmax(200px, 250px) 56px;
+  min-width: 980px;
+  position: relative;
+}
+
+.tb-row {
+  display: grid;
+  grid-template-columns: var(--tb-cols);
+  align-items: center;
+  height: 44px;
+}
+
+.tb-head {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  height: 40px;
+  background: #0f172a;
+  border-bottom: 1px solid var(--border-glass);
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.tb-body {
+  position: relative;
+}
+
+.tb-vrow {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+  font-size: 0.875rem;
+}
+
+.tb-vrow:hover {
+  background: rgba(148, 163, 184, 0.06);
+}
+
+.tb-vrow.is-selected {
+  background: rgba(59, 130, 246, 0.07);
+}
+
+.tb-vrow.is-selected:hover {
+  background: rgba(59, 130, 246, 0.11);
+}
+
+.tb-vrow.is-off .tb-cell {
+  color: var(--text-secondary);
+}
+
+.tb-cell {
+  padding: 0 12px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tb-cell-check {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.tb-cell-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  color: #cbd5e1;
+}
+
+.tb-cell-name {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.tb-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+  color: #cbd5e1;
+}
+
+.tb-cell-center {
+  text-align: center;
+}
+
+/* Only for a genuinely unknown value. A known 0 is a real answer and renders as a normal figure. */
+.tb-unknown {
+  color: var(--text-secondary);
+  font-style: italic;
+  font-variant-numeric: normal;
+}
+
+.tb-checkbox {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent-blue);
+  cursor: pointer;
+}
+
+.tb-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+
+.tb-sort:hover {
+  color: var(--text-primary);
+}
+
+.tb-sort[data-active="true"] {
+  color: #93c5fd;
+}
+
+.tb-sort .tb-sort-icon {
+  opacity: 0.45;
+}
+
+.tb-sort[data-active="true"] .tb-sort-icon {
+  opacity: 1;
+}
+
+.tb-cell-input {
+  width: 100%;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--border-glass);
+  border-radius: 6px;
+  background: #0b1220;
+  color: var(--text-primary);
+  font-size: 0.8rem;
+}
+
+.tb-cell-input:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.tb-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.tb-badge-lob {
+  background: rgba(244, 63, 94, 0.12);
+  color: #fb7185;
+}
+
+.tb-badge-warn {
+  margin-left: 8px;
+  background: rgba(245, 158, 11, 0.12);
+  color: #fcd34d;
+}
+
+.tb-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background-color 160ms ease, color 160ms ease;
+}
+
+.tb-icon-btn:hover {
+  background: rgba(244, 63, 94, 0.14);
+  color: #fb7185;
+}
+
+.tb-footer {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 22px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border-glass);
+  background: #0f172a;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.tb-footer strong {
+  color: var(--text-primary);
+  font-weight: 700;
+}
+
+.tb-footer .tb-accent {
+  color: #60a5fa;
+}
+
+.tb-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 260px;
+  padding: 32px 16px;
+  text-align: center;
+  color: var(--text-secondary);
+}
+
+.tb-empty svg {
+  opacity: 0.55;
+}
+
+.tb-empty p {
+  margin: 0;
+  max-width: 420px;
+  font-size: 0.9rem;
+}
+
+.tb-empty-title {
+  color: var(--text-primary);
+  font-weight: 700;
+  font-size: 1rem;
+}
+
+.tb-empty-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 6px;
+}

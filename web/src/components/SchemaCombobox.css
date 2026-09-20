@@ -1,0 +1,199 @@
+/* SchemaCombobox styles itself rather than borrowing `.tb-*` or `.input`: it is used both in the
+   table-selection toolbar (plain CSS) and in a Tailwind-styled dialog, and the global
+   `select, textarea` rule in index.css would fight utility classes on a native <select>. */
+
+.sc-wrap {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+}
+
+.sc-field {
+  position: relative;
+}
+
+.sc-input {
+  width: 100%;
+  padding: 0 38px 0 12px;
+  border: 1px solid var(--border-glass);
+  border-radius: 8px;
+  background: #0b1220;
+  color: var(--text-primary);
+  font-size: 0.875rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.sc-input.sc-sm {
+  height: 36px;
+}
+
+.sc-input.sc-md {
+  height: 44px;
+  padding-left: 14px;
+  font-size: 0.95rem;
+}
+
+.sc-input::placeholder {
+  font-family: inherit;
+  color: var(--text-secondary);
+  opacity: 0.8;
+}
+
+.sc-input:focus {
+  outline: none;
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+}
+
+.sc-input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.sc-toggle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.sc-toggle:hover:not(:disabled) {
+  color: var(--text-primary);
+}
+
+.sc-toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* Absolutely positioned so showing it never changes the height of the row it sits in. */
+.sc-hint {
+  position: absolute;
+  top: 100%;
+  left: 2px;
+  margin-top: 2px;
+  font-size: 0.72rem;
+  line-height: 1.2;
+  color: #fcd34d;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.sc-popup {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  width: max(100%, 300px);
+  max-width: 92vw;
+  border: 1px solid var(--border-glass);
+  border-radius: 10px;
+  background: var(--bg-panel-soft);
+  box-shadow: var(--shadow-panel);
+  overflow: hidden;
+}
+
+.sc-list {
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.sc-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+
+.sc-option.is-active {
+  background: rgba(59, 130, 246, 0.16);
+}
+
+.sc-option.is-current .sc-name {
+  color: #93c5fd;
+}
+
+.sc-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sc-count {
+  flex: none;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.sc-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 12px 14px;
+  font-size: 0.82rem;
+}
+
+.sc-row:has(> svg) {
+  flex-direction: row;
+  align-items: center;
+}
+
+.sc-muted {
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+}
+
+.sc-error {
+  color: #fecdd3;
+}
+
+.sc-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border-glass);
+}
+
+.sc-link {
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #60a5fa;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.sc-link:hover {
+  text-decoration: underline;
+}
+
+/* A destination schema this account cannot create tables in. Still selectable, just marked. */
+.sc-count-muted {
+  color: #fcd34d;
+}

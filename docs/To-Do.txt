@@ -1,0 +1,8 @@
+1. Target table is Truncating now, need to plan change that later.
+   Status: still truncates on purpose (repeatable re-runs, no duplicate rows).
+   The decision now lives in one place - the `else` branch of
+   MigrationEngine.StartTableRunAsync - so an "append" mode would be a small change
+   there plus a job-level option. See docs/User-Guide.md "Target schema and table
+   behavior".
+2. Plan: Change track. new row + old rows updated.\
+3. Change Track feature

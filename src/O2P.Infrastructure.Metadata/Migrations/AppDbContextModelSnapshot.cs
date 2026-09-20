@@ -460,8 +460,14 @@ namespace O2P.Infrastructure.Metadata.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<DateTimeOffset?>("RowsCountedAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<long?>("SegmentBytes")
                         .HasColumnType("bigint");
+
+                    b.Property<bool>("SizeIsEstimate")
+                        .HasColumnType("boolean");
 
                     b.Property<string>("TableName")
                         .IsRequired()
@@ -753,6 +759,12 @@ namespace O2P.Infrastructure.Metadata.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<DateTimeOffset?>("RowsCountedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("SizeIsEstimate")
+                        .HasColumnType("boolean");
+
                     b.Property<string>("TableName")
                         .IsRequired()
                         .HasColumnType("text");
@@ -939,6 +951,9 @@ namespace O2P.Infrastructure.Metadata.Migrations
                     b.Property<DateTimeOffset?>("CompletedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<string>("ConstraintSnapshotJson")
+                        .HasColumnType("jsonb");
+
                     b.Property<string>("ErrorMessage")
                         .HasColumnType("text");
 
@@ -958,9 +973,15 @@ namespace O2P.Infrastructure.Metadata.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<string>("TargetNameStyle")
+                        .HasColumnType("text");
+
                     b.Property<string>("TargetTableName")
                         .IsRequired()
                         .HasColumnType("text");
+
+                    b.Property<bool?>("TargetTablePreExisted")
+                        .HasColumnType("boolean");
 
                     b.HasKey("Id");
 
@@ -1099,6 +1120,41 @@ namespace O2P.Infrastructure.Metadata.Migrations
                     b.HasIndex("TableRunId");
 
                     b.ToTable("ValidationResults", "o2p");
+                });
+
+            modelBuilder.Entity("O2P.Domain.Entities.WorkerHeartbeat", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityAlwaysColumn(b.Property<long>("Id"));
+
+                    b.Property<string>("Host")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("InstanceId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTimeOffset>("LastSeenAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("ProcessId")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTimeOffset>("StartedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("InstanceId")
+                        .IsUnique();
+
+                    b.HasIndex("LastSeenAt");
+
+                    b.ToTable("worker_heartbeats", "o2p");
                 });
 
             modelBuilder.Entity("O2P.Domain.Entities.WorkerControl", b =>

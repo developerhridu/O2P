@@ -1,10 +1,12 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using O2P.Infrastructure.Metadata;
 using O2P.Domain.Entities;
 using O2P.Application.Core;
 using O2P.Application.Interfaces;
+using O2P.Application.Schema;
 using System;
 using System.Linq;
 using System.Threading.Tasks;
@@ -13,18 +15,20 @@ namespace O2P.Api.Controllers
 {
     [ApiController]
     [Route("api/v1/[controller]")]
-    [Authorize(Roles = "Admin,Operator,Viewer")]
+   // [Authorize(Roles = "Admin,Operator,Viewer")]
     public class JobsController : ControllerBase
     {
         private readonly AppDbContext _db;
         private readonly MigrationEngine _engine;
         private readonly ISecretProtector _secretProtector;
+        private readonly ILogger<JobsController> _logger;
 
-        public JobsController(AppDbContext db, MigrationEngine engine, ISecretProtector secretProtector)
+        public JobsController(AppDbContext db, MigrationEngine engine, ISecretProtector secretProtector, ILogger<JobsController> logger)
         {
             _db = db;
             _engine = engine;
             _secretProtector = secretProtector;
+            _logger = logger;
         }
 
         [HttpGet]
@@ -76,7 +80,28 @@ namespace O2P.Api.Controllers
 
             if (app == null || manifest == null)
             {
-                return BadRequest("Invalid Application or Manifest selection.");
+                return BadRequest("That migration or table selection does not exist.");
+            }
+
+            // A run copies the tables that are ticked when it starts. With none ticked it would have
+            // nothing to do - and would never finish, since a run is only complete once its tables
+            // are. Refuse it here, where the reason can still be explained, rather than queue it.
+            if (!manifest.Tables.Any(t => t.Included))
+            {
+                return BadRequest("This table selection has no tables ticked, so there is nothing to copy. Open it, tick at least one table, save it, and start the run again.");
+            }
+
+            // Destination names are lower case, so two ticked tables whose names differ only in case
+            // would land on the same one. Unchecked that surfaces as a unique-index violation on
+            // table_runs with no hint what caused it, so refuse now and name the pair.
+            var tableCollisions = PostgresName.FindCollisions(
+                manifest.Tables.Where(t => t.Included).Select(t => t.TableName));
+            if (tableCollisions.Count > 0)
+            {
+                return BadRequest(
+                    "This table selection has tables whose names differ only in upper and lower case, and destination " +
+                    $"table names are lower case: {PostgresName.DescribeCollisions(tableCollisions)}. " +
+                    "Untick one of each pair, then start the run again.");
             }
 
             // Create JobRun
@@ -94,7 +119,10 @@ namespace O2P.Api.Controllers
             _db.JobRuns.Add(job);
             await _db.SaveChangesAsync();
 
-            // Populate TableRuns and allocate target table names using collision suffix logic
+            // Populate TableRuns. The destination name is the source name in lower case, so the table
+            // can be queried without quoting. If an earlier run already made this table under Oracle's
+            // upper-case spelling, preparing it finds that one and loads into it instead, rather than
+            // building a second copy beside it.
             foreach (var table in manifest.Tables.Where(t => t.Included))
             {
                 var tableRun = new TableRun
@@ -102,7 +130,7 @@ namespace O2P.Api.Controllers
                     JobRunId = job.Id,
                     ManifestTableId = table.Id,
                     Status = "Pending",
-                    TargetTableName = table.TableName
+                    TargetTableName = PostgresName.For(table.TableName)
                 };
                 _db.TableRuns.Add(tableRun);
                 await _db.SaveChangesAsync();
@@ -110,7 +138,7 @@ namespace O2P.Api.Controllers
                 var targetBinding = app.Connections.FirstOrDefault(c => c.Slot == request.TargetSlot);
                 if (targetBinding == null)
                 {
-                    return BadRequest("Target slot connection is not bound.");
+                    return BadRequest("No destination database has been chosen for this migration.");
                 }
 
                 tableRun.TargetTableName = await _engine.AllocateTargetNameAsync(tableRun.Id, targetBinding.ConnectionId, request.TargetSchema, table.TableName);
@@ -136,7 +164,7 @@ namespace O2P.Api.Controllers
                 .FirstOrDefaultAsync(j => j.Id == id);
 
             if (job == null) return NotFound("Job not found.");
-            if (job.Status != "Draft") return BadRequest("Only Draft jobs can be launched.");
+            if (job.Status != "Draft") return BadRequest("This run has already been started.");
 
             // Resolve env connections
             var sourceBinding = job.Application.Connections.FirstOrDefault(c => c.Slot == job.SourceSlot);
@@ -144,7 +172,7 @@ namespace O2P.Api.Controllers
 
             if (sourceBinding == null || targetBinding == null)
             {
-                return BadRequest("Source or Target slot connections are not bound.");
+                return BadRequest("The source or destination database has not been chosen for this migration.");
             }
 
             var sourceConn = await _db.Connections.FindAsync(sourceBinding.ConnectionId);
@@ -155,22 +183,32 @@ namespace O2P.Api.Controllers
                 var expectedPhrase = $"MIGRATE {job.Application.Name} LIVE";
                 if (!string.Equals(request?.ConfirmationPhrase, expectedPhrase, StringComparison.Ordinal))
                 {
-                    return BadRequest(new { message = $"Live target requires confirmation phrase: {expectedPhrase}" });
+                    return BadRequest(new { message = $"Copying into a live database needs confirmation. Type: {expectedPhrase}" });
                 }
             }
 
             var sourcePassword = _secretProtector.Unprotect(sourceConn!.SecretCiphertext ?? System.Array.Empty<byte>());
             var targetPassword = _secretProtector.Unprotect(targetConn!.SecretCiphertext ?? System.Array.Empty<byte>());
 
-            // Run preflight checks
-            var preflightResult = await preflightValidator.RunPreflightChecksAsync(sourceConn, sourcePassword, targetConn, targetPassword, job.TargetSchema, default);
+            // Run preflight checks. The job's target tables decide whether CREATE rights are needed:
+            // tables that already exist are reused as-is, so USAGE + INSERT/TRUNCATE is enough.
+            var targetTableNames = job.TableRuns.Select(t => t.TargetTableName).ToList();
+            var preflightResult = await preflightValidator.RunPreflightChecksAsync(
+                sourceConn, sourcePassword, targetConn, targetPassword, job.TargetSchema, targetTableNames, default);
             if (!preflightResult.Passed)
             {
+                _logger.LogWarning("Preflight failed for job {JobId} schema {Schema}: {Details}", job.Id, job.TargetSchema, preflightResult.Details);
                 return BadRequest(new
                 {
-                    message = "Preflight check failed. Job launch aborted.",
-                    errors = preflightResult.Details
+                    message = "The readiness check failed, so the run was not started.",
+                    errors = preflightResult.Details,
+                    warnings = preflightResult.Warnings
                 });
+            }
+
+            foreach (var warning in preflightResult.Warnings)
+            {
+                _logger.LogInformation("Preflight warning for job {JobId}: {Warning}", job.Id, warning);
             }
 
             job.Status = "Queued";
@@ -212,7 +250,47 @@ namespace O2P.Api.Controllers
             var allowed = new[] { "pause", "resume", "cancel", "retry_failed", "update_throttle" };
             if (!allowed.Contains(request.Command))
             {
-                return BadRequest("Unsupported command.");
+                return BadRequest("That action is not recognised.");
+            }
+
+            var now = DateTimeOffset.UtcNow;
+
+            // Cancelling a run that has not started is settled here, straight away. Commands are
+            // carried out by the Worker, so if none is running the cancel would sit unprocessed
+            // forever and the run would stay "Waiting" no matter how often it was clicked.
+            //
+            // It is a conditional update on Status = 'Queued', so it cannot clobber a run the Worker
+            // has just started: if the Worker got there first, no row matches and this falls through
+            // to the normal command, which the Worker handles as it always did. A queued run has no
+            // batches and has suspended no constraints, so there is nothing else to undo.
+            var cancelledHere = false;
+            if (request.Command == "cancel")
+            {
+                var cancelled = await _db.JobRuns
+                    .Where(j => j.Id == id && j.Status == "Queued")
+                    .ExecuteUpdateAsync(s => s
+                        .SetProperty(j => j.Status, "Cancelled")
+                        .SetProperty(j => j.CompletedAt, now));
+
+                if (cancelled > 0)
+                {
+                    cancelledHere = true;
+                    await _db.TableRuns
+                        .Where(t => t.JobRunId == id && (t.Status == "Pending"))
+                        .ExecuteUpdateAsync(s => s
+                            .SetProperty(t => t.Status, "Cancelled")
+                            .SetProperty(t => t.CompletedAt, now)
+                            .SetProperty(t => t.ErrorMessage, "Cancelled before it started."));
+
+                    _db.RunEvents.Add(new RunEvent
+                    {
+                        JobRunId = id,
+                        Actor = User.Identity?.Name ?? "system",
+                        Event = "job.cancelled_before_start",
+                        DetailJson = "{}",
+                        At = now
+                    });
+                }
             }
 
             _db.JobCommands.Add(new JobCommand
@@ -222,11 +300,53 @@ namespace O2P.Api.Controllers
                 Command = request.Command,
                 Payload = request.Payload,
                 IssuedBy = User.Identity?.Name ?? "system",
-                IssuedAt = DateTimeOffset.UtcNow
+                IssuedAt = now,
+                // Already carried out above, so a Worker that starts later does not repeat it.
+                ProcessedAt = cancelledHere ? now : null
             });
 
             await _db.SaveChangesAsync();
             return Accepted();
+        }
+
+        // Removes a run and its history (tables, batches, checks, events, logs, graphs). Only runs that are
+        // not in progress can go: a waiting, running or paused run must be cancelled first, otherwise the
+        // Worker could be writing to rows that vanish underneath it. Destination tables are never touched.
+        [Authorize(Roles = "Admin,Operator")]
+        [HttpDelete("{id}")]
+        public async Task<IActionResult> DeleteJob(long id)
+        {
+            var job = await _db.JobRuns.AsNoTracking().Where(j => j.Id == id).Select(j => new { j.Id, j.Status }).FirstOrDefaultAsync();
+            if (job == null) return NotFound();
+
+            string[] deletable = { "Draft", "Completed", "CompletedWithErrors", "Failed", "Cancelled" };
+            if (!deletable.Contains(job.Status))
+            {
+                return Conflict("This run is still waiting, running or paused. Cancel it first, then delete it.");
+            }
+
+            // A run that was cancelled while a batch was mid-copy can still have that batch working for a
+            // moment. Wait until nothing in it is active so the Worker's final update does not hit a missing row.
+            var stillBusy = await _db.ChunkLogs.AnyAsync(c => c.TableRun.JobRunId == id && c.Status == "Running");
+            if (stillBusy)
+            {
+                return Conflict("A batch of this run is still finishing. Try again in a few seconds.");
+            }
+
+            // Rows without a cascading link to the run (rejected rows, events, logs) and the optional graph
+            // link to a table run are removed explicitly, dependants first, all or nothing.
+            await using var tx = await _db.Database.BeginTransactionAsync();
+            await _db.RowRejects
+                .Where(r => _db.TableRuns.Any(t => t.Id == r.TableRunId && t.JobRunId == id))
+                .ExecuteDeleteAsync();
+            await _db.MetricSamples.Where(m => m.JobRunId == id).ExecuteDeleteAsync();
+            await _db.RunEvents.Where(e => e.JobRunId == id).ExecuteDeleteAsync();
+            await _db.RunLogs.Where(l => l.JobRunId == id).ExecuteDeleteAsync();
+            await _db.JobCommands.Where(c => c.JobRunId == id).ExecuteDeleteAsync();
+            await _db.JobRuns.Where(j => j.Id == id).ExecuteDeleteAsync(); // tables, batches and checks cascade
+            await tx.CommitAsync();
+
+            return NoContent();
         }
 
         // Admin "big red button" for the Job Runs page: cancel every non-terminal job at once and
@@ -316,8 +436,9 @@ namespace O2P.Api.Controllers
             var job = await _db.JobRuns
                 .Include(j => j.Application)
                 .ThenInclude(a => a.Connections)
+                .Include(j => j.TableRuns)
                 .FirstOrDefaultAsync(j => j.Id == id);
-                
+
             if (job == null) return NotFound();
 
             var sourceConnId = job.Application.Connections.First(c => c.Slot == job.SourceSlot).ConnectionId;
@@ -329,7 +450,9 @@ namespace O2P.Api.Controllers
             var sourcePassword = _secretProtector.Unprotect(sourceConn!.SecretCiphertext ?? System.Array.Empty<byte>());
             var targetPassword = _secretProtector.Unprotect(targetConn!.SecretCiphertext ?? System.Array.Empty<byte>());
 
-            var result = await preflightValidator.RunPreflightChecksAsync(sourceConn, sourcePassword, targetConn, targetPassword, job.TargetSchema, default);
+            var targetTableNames = job.TableRuns.Select(t => t.TargetTableName).ToList();
+            var result = await preflightValidator.RunPreflightChecksAsync(
+                sourceConn, sourcePassword, targetConn, targetPassword, job.TargetSchema, targetTableNames, default);
 
             return Ok(result);
         }

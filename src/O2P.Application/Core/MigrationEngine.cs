@@ -3,6 +3,7 @@ using O2P.Application.Interfaces;
 using O2P.Application.Schema;
 using O2P.Domain.Entities;
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -11,55 +12,125 @@ namespace O2P.Application.Core
 {
     public class MigrationEngine
     {
+        /// <summary>Resume fence written by PostgresBinaryWriter; one per target schema.</summary>
+        private const string ChunkLogTableName = "_o2p_chunk_log";
+
         private readonly IAppDbContext _db;
         private readonly IOracleChunkPlanner _chunkPlanner;
         private readonly IPostgresDdlExecutor _ddlExecutor;
+        private readonly IPostgresConstraintManager _constraintManager;
+        private readonly IPostgresSchemaInspector _schemaInspector;
 
-        public MigrationEngine(IAppDbContext db, IOracleChunkPlanner chunkPlanner, IPostgresDdlExecutor ddlExecutor)
+        public MigrationEngine(
+            IAppDbContext db,
+            IOracleChunkPlanner chunkPlanner,
+            IPostgresDdlExecutor ddlExecutor,
+            IPostgresConstraintManager constraintManager,
+            IPostgresSchemaInspector schemaInspector)
         {
             _db = db;
             _chunkPlanner = chunkPlanner;
             _ddlExecutor = ddlExecutor;
+            _constraintManager = constraintManager;
+            _schemaInspector = schemaInspector;
         }
 
+        /// <summary>
+        /// Always returns the base table name (no _mgN suffixes). Rebinds any prior
+        /// suffix-0 allocation to this table run so re-runs load into the same name.
+        /// </summary>
         public async Task<string> AllocateTargetNameAsync(long tableRunId, long targetConnectionId, string targetSchema, string baseName, CancellationToken cancellationToken = default)
         {
-            var normalizedBase = baseName.Trim();
-            for (var suffix = 0; suffix < 10000; suffix++)
+            // The allocation reserves the name O2P would create, and O2P creates in lower case. A run
+            // that ends up reusing an older upper-case table still holds this row; it only has to be
+            // stable and unique per (connection, schema, name), which the lower-cased form is.
+            var normalizedBase = PostgresName.For(baseName.Trim());
+
+            await using var tx = await _db.Database.BeginTransactionAsync(cancellationToken);
+
+            var existingForRun = await _db.TargetNameAllocations
+                .FirstOrDefaultAsync(a => a.TableRunId == tableRunId, cancellationToken);
+
+            var existingBase = await _db.TargetNameAllocations
+                .FirstOrDefaultAsync(
+                    a => a.TargetConnectionId == targetConnectionId
+                         && a.SchemaName == targetSchema
+                         && a.BaseName == normalizedBase
+                         && a.SuffixNumber == 0,
+                    cancellationToken);
+
+            if (existingBase != null)
             {
-                await using var tx = await _db.Database.BeginTransactionAsync(cancellationToken);
-                var allocation = new TargetNameAllocation
+                if (existingForRun != null && existingForRun.Id != existingBase.Id)
                 {
-                    TargetConnectionId = targetConnectionId,
-                    SchemaName = targetSchema,
-                    BaseName = normalizedBase,
-                    SuffixNumber = suffix,
-                    TableRunId = tableRunId,
-                    Status = "reserved",
-                    CreatedAt = DateTimeOffset.UtcNow
-                };
-                _db.TargetNameAllocations.Add(allocation);
-                try
-                {
-                    await _db.SaveChangesAsync(cancellationToken);
-                    await tx.CommitAsync(cancellationToken);
-                    return suffix == 0 ? normalizedBase : $"{normalizedBase}_mg{suffix}";
+                    _db.TargetNameAllocations.Remove(existingForRun);
                 }
-                catch (DbUpdateException)
-                {
-                    await tx.RollbackAsync(cancellationToken);
-                    // A rolled-back insert stays tracked as "Added" in the change tracker. Without
-                    // detaching it here, every subsequent retry in this loop re-sends this same
-                    // still-conflicting row alongside the new candidate, so every future attempt
-                    // fails too - turning what should be a quick suffix bump into a slow crawl
-                    // through all 10000 suffixes before finally throwing.
-                    _db.Entry(allocation).State = EntityState.Detached;
-                }
+
+                existingBase.TableRunId = tableRunId;
+                existingBase.Status = "reserved";
+                existingBase.UpdatedAt = DateTimeOffset.UtcNow;
+                await _db.SaveChangesAsync(cancellationToken);
+                await tx.CommitAsync(cancellationToken);
+                return normalizedBase;
             }
 
-            throw new InvalidOperationException($"Could not allocate a target name for {baseName}.");
+            if (existingForRun != null)
+            {
+                existingForRun.TargetConnectionId = targetConnectionId;
+                existingForRun.SchemaName = targetSchema;
+                existingForRun.BaseName = normalizedBase;
+                existingForRun.SuffixNumber = 0;
+                existingForRun.Status = "reserved";
+                existingForRun.UpdatedAt = DateTimeOffset.UtcNow;
+                await _db.SaveChangesAsync(cancellationToken);
+                await tx.CommitAsync(cancellationToken);
+                return normalizedBase;
+            }
+
+            var allocation = new TargetNameAllocation
+            {
+                TargetConnectionId = targetConnectionId,
+                SchemaName = targetSchema,
+                BaseName = normalizedBase,
+                SuffixNumber = 0,
+                TableRunId = tableRunId,
+                Status = "reserved",
+                CreatedAt = DateTimeOffset.UtcNow
+            };
+            _db.TargetNameAllocations.Add(allocation);
+
+            try
+            {
+                await _db.SaveChangesAsync(cancellationToken);
+                await tx.CommitAsync(cancellationToken);
+                return normalizedBase;
+            }
+            catch (DbUpdateException)
+            {
+                await tx.RollbackAsync(cancellationToken);
+                _db.Entry(allocation).State = EntityState.Detached;
+
+                // Concurrent insert of suffix 0 — rebind to this table run.
+                var raced = await _db.TargetNameAllocations
+                    .FirstOrDefaultAsync(
+                        a => a.TargetConnectionId == targetConnectionId
+                             && a.SchemaName == targetSchema
+                             && a.BaseName == normalizedBase
+                             && a.SuffixNumber == 0,
+                        cancellationToken);
+                if (raced != null)
+                {
+                    raced.TableRunId = tableRunId;
+                    raced.Status = "reserved";
+                    raced.UpdatedAt = DateTimeOffset.UtcNow;
+                    await _db.SaveChangesAsync(cancellationToken);
+                    return normalizedBase;
+                }
+
+                throw new InvalidOperationException($"Could not reserve a destination table name for {baseName}.");
+            }
         }
-        
+
         public async Task StartTableRunAsync(long tableRunId, string oraclePassword, string postgresPassword, CancellationToken cancellationToken)
         {
             var tableRun = await _db.TableRuns
@@ -72,56 +143,236 @@ namespace O2P.Application.Core
                 .ThenInclude(a => a.Connections)
                 .FirstOrDefaultAsync(t => t.Id == tableRunId, cancellationToken);
 
-            if (tableRun == null) throw new Exception("TableRun not found.");
+            if (tableRun == null) throw new Exception("This table is no longer part of the run.");
 
             var sourceBinding = tableRun.JobRun.Application.Connections.FirstOrDefault(c => c.Slot == tableRun.JobRun.SourceSlot);
             var targetBinding = tableRun.JobRun.Application.Connections.FirstOrDefault(c => c.Slot == tableRun.JobRun.TargetSlot);
-            
-            if (sourceBinding == null || targetBinding == null) throw new Exception("Connections not bound.");
-            
+
+            if (sourceBinding == null || targetBinding == null) throw new Exception("The source or destination database has not been chosen for this migration.");
+
             var sourceConn = await _db.Connections.FindAsync(new object[] { sourceBinding.ConnectionId }, cancellationToken);
             var targetConn = await _db.Connections.FindAsync(new object[] { targetBinding.ConnectionId }, cancellationToken);
 
-            // Execute DDL Creation for the pre-migration step
             tableRun.Status = "Creating";
+            // Drop any snapshot left over from an earlier attempt at this same TableRun. Without
+            // this, a retry that stops at the compatibility check below would leave a stale snapshot
+            // for the Worker's safety net, which truncates before restoring - wiping the very table
+            // we are refusing to touch.
+            tableRun.ConstraintSnapshotJson = null;
             tableRun.StartedAt ??= DateTimeOffset.UtcNow;
             await _db.SaveChangesAsync(cancellationToken);
 
-            var createTableDdl = PostgresDdlGenerator.GenerateTableDdl(tableRun.ManifestTable, tableRun.JobRun.TargetSchema, tableRun.TargetTableName);
-            await _ddlExecutor.ExecuteDdlAsync(targetConn!, postgresPassword, createTableDdl, cancellationToken);
+            var targetSchema = tableRun.JobRun.TargetSchema;
 
-            var allocation = await _db.TargetNameAllocations.FirstOrDefaultAsync(a => a.TableRunId == tableRun.Id, cancellationToken);
-            if (allocation != null)
+            // Two source columns that differ only in case would collide once lower-cased, and COPY
+            // would report it mid-load as "column specified more than once" with no hint where it came
+            // from. Refuse here, before the table is touched, naming both.
+            var columnCollisions = PostgresName.FindCollisions(
+                tableRun.ManifestTable.Columns.Where(c => !c.IsExcluded).Select(c => c.ColumnName));
+            if (columnCollisions.Count > 0)
             {
-                allocation.Status = "created";
-                allocation.UpdatedAt = DateTimeOffset.UtcNow;
+                throw new InvalidOperationException(
+                    $"Table {tableRun.ManifestTable.TableName} has columns whose names differ only in upper and lower case, " +
+                    $"and destination names are lower case: {PostgresName.DescribeCollisions(columnCollisions)}. " +
+                    "Leave one of each pair out of the table selection.");
             }
 
-            // Plan Chunks
-            tableRun.Status = "Planning";
-            await _db.SaveChangesAsync(cancellationToken);
+            // Which name to look for, and what to call the columns. O2P now creates tables in lower
+            // case, but tables created by earlier runs are still out there under Oracle's upper-case
+            // spelling, so both are checked and whichever is found decides the spelling for this run.
+            var lowerTableName = PostgresName.For(tableRun.ManifestTable.TableName);
+            var targetTableName = lowerTableName;
+            var style = PostgresName.LowerStyle;
+            PostgresConstraintSnapshot? snapshot = null;
+            var constraintsSuspended = false;
 
-            var chunks = await _chunkPlanner.PlanChunksAsync(
-                sourceConn!,
-                oraclePassword,
-                tableRun.ManifestTable.Owner,
-                tableRun.ManifestTable.TableName,
-                tableRun.ManifestTable.IsPartitioned,
-                tableRun.ManifestTable.IsIot,
-                16, // estimated chunks
-                cancellationToken
-            );
-
-            // Save chunks
-            foreach (var chunk in chunks)
+            try
             {
-                chunk.TableRunId = tableRun.Id;
-                chunk.Status = "Pending";
-                _db.ChunkLogs.Add(chunk);
-            }
+                var tableExisted = await _constraintManager.TableExistsAsync(
+                    targetConn!, postgresPassword, targetSchema, targetTableName, cancellationToken);
 
-            tableRun.Status = "Loading";
-            await _db.SaveChangesAsync(cancellationToken);
+                if (!tableExisted)
+                {
+                    // Nothing in lower case. Before creating one, look for the name an earlier run
+                    // would have used - otherwise that table is left holding a stale full copy while
+                    // a second one is built beside it.
+                    var sourceCasedName = tableRun.ManifestTable.TableName;
+                    if (!string.Equals(sourceCasedName, lowerTableName, StringComparison.Ordinal)
+                        && await _constraintManager.TableExistsAsync(
+                            targetConn!, postgresPassword, targetSchema, sourceCasedName, cancellationToken))
+                    {
+                        targetTableName = sourceCasedName;
+                        style = PostgresName.SourceStyle;
+                        tableExisted = true;
+                    }
+                }
+
+                tableRun.TargetTablePreExisted = tableExisted;
+
+                // Record what was resolved before anything is touched, so a failure leaves behind the
+                // name that was actually acted on. The Worker reads both back for every batch, which
+                // is what keeps all the batches of one run writing the same column names.
+                tableRun.TargetTableName = targetTableName;
+                tableRun.TargetNameStyle = style;
+
+                if (!tableExisted)
+                {
+                    // Absent: create the equivalent schema and load into it. A table created a moment
+                    // ago has no constraints to preserve and no rows to clear, so the snapshot, drop
+                    // and truncate below would every one of them be no-ops.
+                    var createTableDdl = PostgresDdlGenerator.GenerateTableDdl(tableRun.ManifestTable, targetSchema, targetTableName, style);
+                    await _ddlExecutor.ExecuteDdlAsync(targetConn!, postgresPassword, createTableDdl, cancellationToken);
+                }
+                else
+                {
+                    // Present: leave the schema exactly as it is - no CREATE, no ALTER. Prove it can
+                    // accept the manifest BEFORE anything destructive, so a mismatch costs no data.
+                    var liveColumns = await _schemaInspector.GetTableColumnsAsync(
+                        targetConn!, postgresPassword, targetSchema, targetTableName, cancellationToken);
+
+                    if (liveColumns != null)
+                    {
+                        // A table can be lower case outside and upper case inside - hand-built, or
+                        // renamed by someone. Take whichever spelling its columns actually use, so
+                        // that case is reported as a plain mismatch rather than failing mid-copy.
+                        style = ChooseColumnStyle(tableRun.ManifestTable, liveColumns, style);
+                        tableRun.TargetNameStyle = style;
+
+                        var problems = TargetSchemaComparer.Compare(tableRun.ManifestTable, liveColumns, style);
+                        if (TargetSchemaComparer.HasBlockingProblem(problems))
+                        {
+                            throw new TargetSchemaMismatchException(targetSchema, targetTableName, problems);
+                        }
+                    }
+
+                    snapshot = await _constraintManager.SnapshotAsync(
+                        targetConn!, postgresPassword, targetSchema, targetTableName, cancellationToken);
+                    tableRun.ConstraintSnapshotJson = PostgresConstraintSnapshot.Serialize(snapshot);
+                    await _db.SaveChangesAsync(cancellationToken);
+
+                    // Mark suspended before Drop so any mid-drop failure still triggers restore.
+                    constraintsSuspended = snapshot.Constraints.Count > 0;
+                    await _constraintManager.DropAsync(targetConn!, postgresPassword, snapshot, cancellationToken);
+
+                    await _constraintManager.TruncateAsync(
+                        targetConn!, postgresPassword, targetSchema, targetTableName, cancellationToken);
+                }
+
+                await EnsureChunkLogTableAsync(targetConn!, postgresPassword, targetSchema, cancellationToken);
+
+                var allocation = await _db.TargetNameAllocations.FirstOrDefaultAsync(a => a.TableRunId == tableRun.Id, cancellationToken);
+                if (allocation != null)
+                {
+                    allocation.Status = "created";
+                    allocation.UpdatedAt = DateTimeOffset.UtcNow;
+                }
+
+                tableRun.Status = "Planning";
+                await _db.SaveChangesAsync(cancellationToken);
+
+                var chunks = await _chunkPlanner.PlanChunksAsync(
+                    sourceConn!,
+                    oraclePassword,
+                    tableRun.ManifestTable.Owner,
+                    tableRun.ManifestTable.TableName,
+                    tableRun.ManifestTable.IsPartitioned,
+                    tableRun.ManifestTable.IsIot,
+                    16,
+                    cancellationToken
+                );
+
+                foreach (var chunk in chunks)
+                {
+                    chunk.TableRunId = tableRun.Id;
+                    chunk.Status = "Pending";
+                    _db.ChunkLogs.Add(chunk);
+                }
+
+                tableRun.Status = "Loading";
+                await _db.SaveChangesAsync(cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                if (constraintsSuspended && snapshot != null)
+                {
+                    try
+                    {
+                        // Partial rows can block PK/UNIQUE recreate — clear then restore schema.
+                        await _constraintManager.TruncateAsync(
+                            targetConn!, postgresPassword, targetSchema, targetTableName, cancellationToken);
+                        await _constraintManager.RestoreAsync(targetConn!, postgresPassword, snapshot, cancellationToken);
+                    }
+                    catch (Exception restoreEx)
+                    {
+                        throw new InvalidOperationException(
+                            $"Preparing the table failed, and its constraints could not be put back. Original problem: {ex.Message}. Restore problem: {restoreEx.Message}",
+                            ex);
+                    }
+                }
+
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Picks the spelling an existing table's columns actually use, by counting how many of the
+        /// loaded columns each candidate finds. The table name is only a hint: a table can be lower
+        /// case outside and upper case inside, or the other way about. Ties keep <paramref name="preferred"/>,
+        /// which is the style the table name suggested, so a table with no matching columns at all is
+        /// still reported against the expected spelling rather than an arbitrary one.
+        /// </summary>
+        private static string ChooseColumnStyle(
+            ManifestTable manifest,
+            IReadOnlyList<PostgresLiveColumn> liveColumns,
+            string preferred)
+        {
+            var live = new HashSet<string>(liveColumns.Select(c => c.ColumnName), StringComparer.Ordinal);
+            var loaded = manifest.Columns.Where(c => !c.IsExcluded).ToList();
+            if (loaded.Count == 0) return preferred;
+
+            var lowerHits = loaded.Count(c => live.Contains(PostgresName.For(c.ColumnName)));
+            var sourceHits = loaded.Count(c => live.Contains(c.ColumnName));
+
+            if (lowerHits > sourceHits) return PostgresName.LowerStyle;
+            if (sourceHits > lowerHits) return PostgresName.SourceStyle;
+            return preferred;
+        }
+
+        /// <summary>
+        /// Creates the per-schema chunk fence table up front, while nothing else is running for this
+        /// table. The writer opens every chunk with its own CREATE TABLE IF NOT EXISTS for this same
+        /// table, but that is not race-safe in Postgres: concurrent chunks can both pass the
+        /// existence check, and the losers die on pg_type's unique index
+        /// ("duplicate key value violates unique constraint \"pg_type_typname_nsp_index\"").
+        /// Creating it once here means the writer's copy always finds it already present.
+        /// </summary>
+        private async Task EnsureChunkLogTableAsync(
+            Connection targetConnection,
+            string postgresPassword,
+            string targetSchema,
+            CancellationToken cancellationToken)
+        {
+            var ddl = $@"
+CREATE TABLE IF NOT EXISTS {SqlIdentifier.QuotePostgresQualified(targetSchema, ChunkLogTableName)} (
+    job_run_id bigint NOT NULL,
+    table_run_id bigint NOT NULL,
+    chunk_index integer NOT NULL,
+    completed_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (job_run_id, table_run_id, chunk_index)
+);";
+
+            try
+            {
+                await _ddlExecutor.ExecuteDdlAsync(targetConnection, postgresPassword, ddl, cancellationToken);
+            }
+            catch (Exception)
+            {
+                // Another worker preparing a different job against this schema may have won the same
+                // race. If the table is there now, that is exactly the outcome we wanted.
+                var exists = await _constraintManager.TableExistsAsync(
+                    targetConnection, postgresPassword, targetSchema, ChunkLogTableName, cancellationToken);
+                if (!exists) throw;
+            }
         }
     }
 }
