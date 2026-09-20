@@ -65,6 +65,10 @@ export default function ApplicationDetail() {
   // Must match JobsController.LaunchJob exactly, or the server rejects the launch.
   const livePhrase = `MIGRATE ${app?.name ?? ''} LIVE`;
 
+  // The destination picker lists schemas from whichever database the chosen "Copy to" role points at.
+  const targetConnectionId: number | '' =
+    slotBindings.find((b: any) => b.slot === targetSlot)?.connectionId ?? '';
+
   const loadAll = async () => {
     setLoading(true);
     setError(null);
@@ -425,8 +429,15 @@ export default function ApplicationDetail() {
                 </div>
               </div>
               <div>
-                <label className="label">Destination schema</label>
-                <input className="input" value={targetSchema} onChange={(event) => setTargetSchema(event.target.value)} required />
+                <label className="label" htmlFor="run-target-schema">Destination schema</label>
+                <SchemaCombobox
+                  id="run-target-schema"
+                  size="md"
+                  variant="postgres"
+                  connectionId={targetConnectionId}
+                  value={targetSchema}
+                  onChange={setTargetSchema}
+                />
               </div>
               {targetSlot.endsWith('live') && (
                 <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4">

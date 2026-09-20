@@ -8,6 +8,7 @@ using O2P.Application.Interfaces;
 using Oracle.ManagedDataAccess.Client;
 using Npgsql;
 using System;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -102,6 +103,43 @@ namespace O2P.Api.Controllers
             _db.Connections.Remove(conn);
             await _db.SaveChangesAsync();
             return NoContent();
+        }
+
+        /// <summary>
+        /// Schemas in a PostgreSQL destination that this account can use, for the destination
+        /// picker. Restricted like the other endpoints that open a live session with stored
+        /// credentials.
+        /// </summary>
+        [HttpGet("{id}/schemas")]
+        [Authorize(Roles = "Admin,Operator")]
+        public async Task<IActionResult> GetSchemas(
+            long id,
+            [FromServices] IPostgresSchemaInspector inspector,
+            CancellationToken cancellationToken)
+        {
+            var conn = await _db.Connections.FindAsync(new object[] { id }, cancellationToken);
+            if (conn == null || conn.Kind != O2P.Domain.Enums.ConnectionKind.Postgres)
+                return BadRequest("That destination database does not exist.");
+
+            string password;
+            try
+            {
+                password = _secretProtector.Unprotect(conn.SecretCiphertext ?? System.Array.Empty<byte>());
+            }
+            catch (System.Exception ex)
+            {
+                return BadRequest($"Could not decrypt stored credentials for this connection: {ex.Message}. Re-enter the connection's password and try again.");
+            }
+
+            try
+            {
+                var schemas = await inspector.ListSchemasAsync(conn, password, cancellationToken);
+                return Ok(new { schemas = schemas.Select(s => new { name = s.Name, canCreate = s.CanCreate }) });
+            }
+            catch (System.Exception ex)
+            {
+                return BadRequest($"Could not read the schemas: {ex.Message}");
+            }
         }
 
         [HttpPost("{id}/test")]

@@ -144,7 +144,32 @@ const rendered = await rowCount();
 const ariaRows = await page.locator('.tb-grid').getAttribute('aria-rowcount');
 check(rendered > 5 && rendered < 80, `only ${rendered} of ${TABLE_COUNT} rows are in the DOM`);
 check(ariaRows === String(TABLE_COUNT + 1), `aria-rowcount reports ${ariaRows} (${TABLE_COUNT} rows + header)`);
-check((await firstName()) === 'T_0001', `first row is T_0001`);
+
+// Default order is by row count, largest first.
+const rowsHeader = page.getByRole('columnheader', { name: /^Rows/ });
+check((await rowsHeader.getAttribute('aria-sort')) === 'descending', 'opens sorted by row count, largest first');
+const firstRowsValue = Number((await rows().first().locator('.tb-num').first().innerText()).replace(/,/g, ''));
+const secondRowsValue = Number((await rows().nth(1).locator('.tb-num').first().innerText()).replace(/,/g, ''));
+check(firstRowsValue >= secondRowsValue, `and the figures really do descend (${firstRowsValue} >= ${secondRowsValue})`);
+
+// The row-count sort control mirrors and drives that order.
+const mostFirst = page.getByRole('button', { name: 'Most first' });
+const fewestFirst = page.getByRole('button', { name: 'Fewest first' });
+check((await mostFirst.getAttribute('aria-pressed')) === 'true', 'the "Most first" control shows as active by default');
+await fewestFirst.click();
+await page.waitForTimeout(250);
+check((await rowsHeader.getAttribute('aria-sort')) === 'ascending', '"Fewest first" switches to ascending');
+const lowest = Number((await rows().first().locator('.tb-num').first().innerText()).replace(/,/g, ''));
+check(lowest <= firstRowsValue, `and puts a smaller table on top (${lowest})`);
+await mostFirst.click();
+await page.waitForTimeout(250);
+check((await rowsHeader.getAttribute('aria-sort')) === 'descending', '"Most first" switches back to descending');
+
+// Put the grid in name order for the row-identity checks below.
+const tableHeader = page.getByRole('columnheader', { name: /^Table/ });
+await tableHeader.getByRole('button').click();
+await page.waitForTimeout(250);
+check((await firstName()) === 'T_0001', 'sorting by name puts T_0001 first');
 
 // Row filter must survive scrolling out of view: the value lives in state, not the DOM.
 const filterInput = rows().first().locator('.tb-cell-input');
@@ -159,17 +184,15 @@ check((await rows().first().locator('.tb-cell-input').inputValue()) === 'YEAR = 
 
 // ---- sort ---------------------------------------------------------------------------------
 section('sorting');
-const tableHeader = page.getByRole('columnheader', { name: /^Table/ });
+// Starting from name-ascending, set above.
+check((await tableHeader.getAttribute('aria-sort')) === 'ascending', 'the name column reports ascending');
 await tableHeader.getByRole('button').click();
-check((await tableHeader.getAttribute('aria-sort')) === 'ascending', 'first click sorts ascending (aria-sort)');
-await tableHeader.getByRole('button').click();
-check((await tableHeader.getAttribute('aria-sort')) === 'descending', 'second click sorts descending');
+check((await tableHeader.getAttribute('aria-sort')) === 'descending', 'clicking again sorts descending');
 check((await firstName()) === `T_${pad(TABLE_COUNT)}`, 'descending puts T_5000 first');
 await tableHeader.getByRole('button').click();
-check((await tableHeader.getAttribute('aria-sort')) === 'none', 'third click clears the sort');
-check((await firstName()) === 'T_0001', 'cleared sort restores the original order');
+check((await tableHeader.getAttribute('aria-sort')) === 'none', 'a third click clears the sort');
+check((await firstName()) === 'T_0001', 'cleared sort restores the seeded order');
 
-const rowsHeader = page.getByRole('columnheader', { name: /^Rows/ });
 await rowsHeader.getByRole('button').click();
 await rowsHeader.getByRole('button').click();
 const topRows = await rows().first().locator('.tb-num').first().innerText();
@@ -188,7 +211,8 @@ check(/0 selected of 5,000/.test(await footerText()), 'header checkbox deselects
 
 await page.getByLabel('Search tables').fill('T_00');
 await page.waitForTimeout(200);
-const segText = async () => (await page.locator('.tb-seg').innerText()).replace(/\s+/g, ' ');
+// Scoped by aria-label: there are two .tb-seg groups now, the status filter and the row-count sort.
+const segText = async () => (await page.getByRole('group', { name: 'Show tables' }).innerText()).replace(/\s+/g, ' ');
 check(/All 99 Selected 0 Unselected 99/.test(await segText()), `search "T_00" matches 99 tables (${await segText()})`);
 check(/Showing 99 of 5,000/.test(await page.locator('.tb-toolbar').last().innerText()), 'readout says "Showing 99 of 5,000"');
 

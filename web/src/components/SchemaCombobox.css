@@ -192,3 +192,8 @@
 .sc-link:hover {
   text-decoration: underline;
 }
+
+/* A destination schema this account cannot create tables in. Still selectable, just marked. */
+.sc-count-muted {
+  color: #fcd34d;
+}

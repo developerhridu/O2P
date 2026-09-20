@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { ChevronDown, RefreshCw } from 'lucide-react';
-import { fetchSchemas, type SourceSchema, type SourceSchemaList } from '../api';
+import { fetchSchemas, fetchTargetSchemas } from '../api';
 import './SchemaCombobox.css';
 
 type Props = {
@@ -13,15 +13,49 @@ type Props = {
   /** sm = 36px (toolbar), md = 44px (form dialog). */
   size?: 'sm' | 'md';
   className?: string;
+  /**
+   * Which side this picker is for. 'oracle' lists the source schemas that own readable tables;
+   * 'postgres' lists the schemas of a destination database.
+   */
+  variant?: 'oracle' | 'postgres';
 };
 
+/** One row in the list, whichever side it came from. */
+type SchemaOption = { name: string; detail: string; muted?: boolean };
+
+type SchemaData = { options: SchemaOption[]; skipped: number };
+
+async function loadOptions(variant: 'oracle' | 'postgres', connectionId: number): Promise<SchemaData> {
+  if (variant === 'postgres') {
+    const data = await fetchTargetSchemas(connectionId);
+    return {
+      options: data.schemas.map((s) => ({
+        name: s.name,
+        // A run only needs CREATE for tables that do not exist yet, so a read-only schema is
+        // still offered - just marked, so the choice is informed.
+        detail: s.canCreate ? 'can create tables' : 'read-only',
+        muted: !s.canCreate,
+      })),
+      skipped: 0,
+    };
+  }
+  const data = await fetchSchemas(connectionId);
+  return {
+    options: data.schemas.map((s) => ({
+      name: s.name,
+      detail: `${s.tableCount.toLocaleString()} ${s.tableCount === 1 ? 'table' : 'tables'}`,
+    })),
+    skipped: data.skipped,
+  };
+}
+
 // A stable empty list, so `schemas` keeps the same identity while nothing is loaded.
-const NO_SCHEMAS: SourceSchema[] = [];
+const NO_SCHEMAS: SchemaOption[] = [];
 
 type Load =
   | { connId: number; status: 'loading' }
   | { connId: number; status: 'error'; message: string }
-  | { connId: number; status: 'ready'; data: SourceSchemaList };
+  | { connId: number; status: 'ready'; data: SchemaData };
 
 /**
  * A schema picker fed from the real source database.
@@ -34,7 +68,7 @@ type Load =
  * The list is fetched the first time the box is opened - not on mount - because merely opening a
  * saved selection should not open an Oracle session, possibly against the wrong database.
  */
-export default function SchemaCombobox({ id, value, onChange, connectionId, disabled, size = 'sm', className }: Props) {
+export default function SchemaCombobox({ id, value, onChange, connectionId, disabled, size = 'sm', className, variant = 'oracle' }: Props) {
   const listId = useId();
   const wrapRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -47,7 +81,7 @@ export default function SchemaCombobox({ id, value, onChange, connectionId, disa
   const [load, setLoad] = useState<Load | null>(null);
 
   // Successful lists, per database, so going back to a previous one is instant.
-  const cache = useRef(new Map<number, SourceSchemaList>());
+  const cache = useRef(new Map<number, SchemaData>());
   // Guards against a slow response for a database the user has since switched away from.
   const requestSeq = useRef(0);
 
@@ -61,7 +95,7 @@ export default function SchemaCombobox({ id, value, onChange, connectionId, disa
   const runLoad = (connId: number) => {
     const seq = ++requestSeq.current;
     setLoad({ connId, status: 'loading' });
-    fetchSchemas(connId)
+    loadOptions(variant, connId)
       .then((data) => {
         cache.current.set(connId, data);
         if (seq === requestSeq.current) setLoad({ connId, status: 'ready', data });
@@ -85,8 +119,11 @@ export default function SchemaCombobox({ id, value, onChange, connectionId, disa
     runLoad(connectionId);
   };
 
-  const schemas = current?.status === 'ready' ? current.data.schemas : NO_SCHEMAS;
+  const schemas = current?.status === 'ready' ? current.data.options : NO_SCHEMAS;
   const skipped = current?.status === 'ready' ? current.data.skipped : 0;
+
+  const matchesValue = (name: string) =>
+    variant === 'oracle' ? name.toUpperCase() === value.trim().toUpperCase() : name === value.trim();
 
   const filter = typed ? value.trim().toUpperCase() : '';
   const options = useMemo(
@@ -96,13 +133,13 @@ export default function SchemaCombobox({ id, value, onChange, connectionId, disa
 
   // Once a list has loaded, a value that is not in it gets a quiet hint. It never blocks or clears.
   const notInList =
-    current?.status === 'ready' && value.trim() !== '' && !schemas.some((s) => s.name === value.trim().toUpperCase());
+    current?.status === 'ready' && value.trim() !== '' && !schemas.some((s) => matchesValue(s.name));
 
   // Keep the highlighted row in step with the visible options.
   useEffect(() => {
     if (!open) return;
     if (typed) setActive(options.length > 0 ? 0 : -1);
-    else setActive(Math.max(0, options.findIndex((o) => o.name === value.trim().toUpperCase())));
+    else setActive(Math.max(0, options.findIndex((o) => matchesValue(o.name))));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, typed, options.length]);
 
@@ -220,7 +257,7 @@ export default function SchemaCombobox({ id, value, onChange, connectionId, disa
           placeholder={connectionId === '' ? 'Choose a source database first' : 'Choose or type a schema'}
           value={value}
           onChange={(e) => {
-            onChange(e.target.value.toUpperCase());
+            onChange(variant === 'oracle' ? e.target.value.toUpperCase() : e.target.value);
             setTyped(true);
             setOpen(true);
           }}
@@ -261,7 +298,7 @@ export default function SchemaCombobox({ id, value, onChange, connectionId, disa
                   id={`${listId}-opt-${i}`}
                   role="option"
                   aria-selected={i === active}
-                  className={`sc-option ${i === active ? 'is-active' : ''} ${s.name === value.trim().toUpperCase() ? 'is-current' : ''}`}
+                  className={`sc-option ${i === active ? 'is-active' : ''} ${matchesValue(s.name) ? 'is-current' : ''}`}
                   // mousedown, not click, so the input keeps focus and the popup does not close first.
                   onMouseDown={(e) => {
                     e.preventDefault();
@@ -270,9 +307,7 @@ export default function SchemaCombobox({ id, value, onChange, connectionId, disa
                   onMouseEnter={() => setActive(i)}
                 >
                   <span className="sc-name">{s.name}</span>
-                  <span className="sc-count">
-                    {s.tableCount.toLocaleString()} {s.tableCount === 1 ? 'table' : 'tables'}
-                  </span>
+                  <span className={`sc-count ${s.muted ? 'sc-count-muted' : ''}`}>{s.detail}</span>
                 </li>
               ))}
             </ul>

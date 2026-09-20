@@ -95,7 +95,16 @@ namespace O2P.Api.Controllers
                 {
                     Owner = cache.Owner,
                     TableName = cache.TableName,
-                    Included = true // Include by default
+                    Included = true, // Include by default
+                    // Carry the scan's statistics across. Without this the generated selection shows
+                    // "Unknown" for every table even where the scan did find figures.
+                    EstRows = cache.NumRows,
+                    EstBytes = cache.SegmentBytes,
+                    SizeIsEstimate = cache.SizeIsEstimate,
+                    RowsCountedAt = cache.RowsCountedAt,
+                    HasLobs = cache.LobBytes.HasValue && cache.LobBytes.Value > 0,
+                    IsPartitioned = cache.IsPartitioned,
+                    IsIot = cache.IsIot
                 };
 
                 foreach (var col in cache.Columns)

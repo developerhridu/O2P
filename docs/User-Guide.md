@@ -134,8 +134,13 @@ The source account must be able to:
 
 Additional dictionary access improves discovery statistics and ROWID/partition batch planning:
 
-- `ALL_SEGMENTS`, `ALL_LOBS`, `ALL_EXTENTS`, `ALL_OBJECTS`, and `ALL_TAB_PARTITIONS`; or
+- `ALL_LOBS`, `ALL_EXTENTS`, `ALL_OBJECTS`, and `ALL_TAB_PARTITIONS`; or
 - corresponding `DBA_*` views when `SELECT ANY DICTIONARY` is granted.
+
+For **table sizes** specifically, grant `SELECT` on `DBA_SEGMENTS` (or `SELECT ANY DICTIONARY`). There is
+no `ALL_SEGMENTS` view in Oracle — only `DBA_SEGMENTS` and `USER_SEGMENTS` — so without one of those, an
+account can read exact sizes only for its own schema. Where neither is readable, O2P estimates the size
+from `ALL_TABLES` statistics and marks it with a `~`.
 
 If extent or primary-key metadata is unavailable, the planner may fall back to ROWID hashing or a whole-table/whole-partition read. The migration is intended to remain read-only on Oracle.
 
@@ -160,7 +165,10 @@ The target account needs:
 - permission to truncate existing target tables;
 - permission to drop and recreate applicable constraints on the target and referencing tables.
 
-The target schema must already exist. O2P does not create it.
+The target schema must already exist. O2P does not create it. The **Destination schema** field on the
+Start-a-run dialog lists the schemas the account can use in the chosen destination database, reading
+`pg_namespace` and `has_schema_privilege`, and marks each one with whether tables can be created in it.
+A schema that is not listed can still be typed.
 
 Example:
 
@@ -431,12 +439,13 @@ A full scan replaces the cached discovery rows for that connection and owner. A 
 Discovery records:
 
 - table name and owner;
-- approximate row count from Oracle statistics;
-- segment and LOB byte estimates when dictionary views are available;
+- row count from Oracle statistics, where they exist;
+- table size, read from `DBA_SEGMENTS` or `USER_SEGMENTS` when the account can see them, otherwise estimated from statistics and marked `~`;
+- LOB byte totals when `ALL_LOBS` is readable;
 - partitioned and index-organized-table flags;
 - columns, Oracle data types, lengths, precision, scale, nullability, and identity flag.
 
-Estimates may be missing or stale because they come from Oracle catalog statistics. They are planning information, not final validation.
+Figures may be missing or stale, because Oracle only records a row count once `DBMS_STATS` has gathered statistics for the table. A table with none shows **Unknown** rather than `0` — the two mean very different things, and a table that genuinely holds no rows is shown as `0`. **Sync counts & sizes** on the table-selection screen replaces Unknown with an exact `SELECT COUNT(*)` and the table's current size; each count reads the whole table on the source, so it is an explicit action rather than part of every scan. These are planning figures, not final validation.
 
 The standalone **Discovery** navigation page is currently a visual placeholder and does not call the API. Use Migration → **Auto-Gen Table Selection** or **Custom Builder**.
 

@@ -460,8 +460,14 @@ namespace O2P.Infrastructure.Metadata.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<DateTimeOffset?>("RowsCountedAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<long?>("SegmentBytes")
                         .HasColumnType("bigint");
+
+                    b.Property<bool>("SizeIsEstimate")
+                        .HasColumnType("boolean");
 
                     b.Property<string>("TableName")
                         .IsRequired()
@@ -752,6 +758,12 @@ namespace O2P.Infrastructure.Metadata.Migrations
                     b.Property<string>("Owner")
                         .IsRequired()
                         .HasColumnType("text");
+
+                    b.Property<DateTimeOffset?>("RowsCountedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("SizeIsEstimate")
+                        .HasColumnType("boolean");
 
                     b.Property<string>("TableName")
                         .IsRequired()

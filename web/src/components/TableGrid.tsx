@@ -1,7 +1,7 @@
 import { useEffect, useRef, type ReactNode } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { ArrowDown, ArrowUp, ArrowUpDown, X } from 'lucide-react';
-import { formatBytes, formatCount } from '../format';
+import { formatBytes, formatCount, formatRows, formatSize, UNKNOWN_LABEL } from '../format';
 
 export type GridRow = {
   key: string;
@@ -11,6 +11,7 @@ export type GridRow = {
   whereClause: string;
   estRows: number | null;
   estBytes: number | null;
+  sizeIsEstimate?: boolean;
   hasLobs: boolean;
   columns: unknown[];
 };
@@ -38,7 +39,9 @@ type Props = {
     selected: number;
     total: number;
     rows: number;
+    rowsUnknown: number;
     bytes: number;
+    bytesUnknown: number;
     withFilter: number;
   };
 };
@@ -163,8 +166,26 @@ export default function TableGrid({
                       {row.tableName}
                       {row.columns.length === 0 && <span className="tb-badge tb-badge-warn">No column info</span>}
                     </div>
-                    <div className="tb-cell tb-num" role="cell">{formatCount(row.estRows ?? 0)}</div>
-                    <div className="tb-cell tb-num" role="cell">{formatBytes(row.estBytes ?? 0)}</div>
+                    <div
+                      className={`tb-cell tb-num ${row.estRows == null ? 'tb-unknown' : ''}`}
+                      role="cell"
+                      title={row.estRows == null ? 'Oracle has no statistics for this table. Use "Get exact counts" to count it.' : undefined}
+                    >
+                      {formatRows(row.estRows)}
+                    </div>
+                    <div
+                      className={`tb-cell tb-num ${row.estBytes == null ? 'tb-unknown' : ''}`}
+                      role="cell"
+                      title={
+                        row.estBytes == null
+                          ? 'No size could be read for this table.'
+                          : row.sizeIsEstimate
+                            ? 'Estimated from Oracle statistics, not read from a segments view.'
+                            : undefined
+                      }
+                    >
+                      {formatSize(row.estBytes, row.sizeIsEstimate)}
+                    </div>
                     <div className="tb-cell tb-cell-center" role="cell">
                       {row.hasLobs && <span className="tb-badge tb-badge-lob">LOB</span>}
                     </div>
@@ -204,9 +225,11 @@ export default function TableGrid({
         </span>
         <span>
           Rows <strong>{formatCount(stats.rows)}</strong>
+          {stats.rowsUnknown > 0 && <span className="tb-unknown"> · {formatCount(stats.rowsUnknown)} {UNKNOWN_LABEL.toLowerCase()}</span>}
         </span>
         <span>
           Size <strong>{formatBytes(stats.bytes)}</strong>
+          {stats.bytesUnknown > 0 && <span className="tb-unknown"> · {formatCount(stats.bytesUnknown)} {UNKNOWN_LABEL.toLowerCase()}</span>}
         </span>
         {stats.withFilter > 0 && (
           <span>

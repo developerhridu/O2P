@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { ArrowLeft, ChevronDown, Plus, RefreshCw, Save, Search, SearchX, Table2 } from 'lucide-react';
+import { ArrowLeft, ChevronDown, Plus, RefreshCcw, RefreshCw, Save, Search, SearchX, Table2 } from 'lucide-react';
 import {
   createManifest,
   fetchConnections,
   fetchManifest,
+  syncTableStats,
   refreshDiscovery,
   updateManifestTables,
 } from '../api';
@@ -31,11 +32,22 @@ type BuilderTable = {
   whereClause: string;
   estRows: number | null;
   estBytes: number | null;
+  sizeIsEstimate: boolean;
+  rowsCountedAt: string | null;
   hasLobs: boolean;
   isPartitioned: boolean;
   isIot: boolean;
   columns: BuilderColumn[];
 };
+
+// Sorts unknown values to the end whichever direction is chosen: an unknown row is not "smaller"
+// than a known one, it is simply not comparable. A known 0 sorts as 0, not as unknown.
+function compareMaybe(a: number | null, b: number | null, dir: number): number {
+  if (a == null && b == null) return 0;
+  if (a == null) return 1;
+  if (b == null) return -1;
+  return (a - b) * dir;
+}
 
 const rowKey = (owner: string, tableName: string) => `${owner.toUpperCase()}.${tableName.toUpperCase()}`;
 
@@ -48,6 +60,8 @@ function toBuilderTable(raw: any): BuilderTable {
     whereClause: raw.whereClause || '',
     estRows: raw.estRows ?? null,
     estBytes: raw.estBytes ?? null,
+    sizeIsEstimate: !!raw.sizeIsEstimate,
+    rowsCountedAt: raw.rowsCountedAt ?? null,
     hasLobs: !!raw.hasLobs,
     isPartitioned: !!raw.isPartitioned,
     isIot: !!raw.isIot,
@@ -96,7 +110,10 @@ export default function ManifestBuilder() {
 
   // View-only state: none of this is saved or sent to the API.
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
-  const [sort, setSort] = useState<SortState>(null);
+  // Biggest tables first by default: when picking what to migrate, size is what you look at first.
+  const [sort, setSort] = useState<SortState>({ key: 'estRows', dir: 'desc' });
+  const [counting, setCounting] = useState<{ done: number; total: number; failed: number } | null>(null);
+  const countingAbort = useRef(false);
   const [addOpen, setAddOpen] = useState(false);
   const addWrapRef = useRef<HTMLDivElement>(null);
   const addBtnRef = useRef<HTMLButtonElement>(null);
@@ -162,9 +179,9 @@ export default function ManifestBuilder() {
     const compare = (a: BuilderTable, b: BuilderTable) => {
       switch (sort.key) {
         case 'estRows':
-          return ((a.estRows ?? 0) - (b.estRows ?? 0)) * dir;
+          return compareMaybe(a.estRows, b.estRows, dir);
         case 'estBytes':
-          return ((a.estBytes ?? 0) - (b.estBytes ?? 0)) * dir;
+          return compareMaybe(a.estBytes, b.estBytes, dir);
         default:
           // numeric: true so BL_2 sorts before BL_10.
           return a[sort.key].localeCompare(b[sort.key], undefined, { numeric: true, sensitivity: 'base' }) * dir;
@@ -279,6 +296,8 @@ export default function ManifestBuilder() {
         whereClause: t.whereClause || null,
         estRows: t.estRows,
         estBytes: t.estBytes,
+        sizeIsEstimate: t.sizeIsEstimate,
+        rowsCountedAt: t.rowsCountedAt,
         hasLobs: t.hasLobs,
         isPartitioned: t.isPartitioned,
         isIot: t.isIot,
@@ -322,9 +341,59 @@ export default function ManifestBuilder() {
   const stats = {
     selected: includedTables.length,
     total: tables.length,
-    rows: includedTables.reduce((acc, t) => acc + (t.estRows || 0), 0),
-    bytes: includedTables.reduce((acc, t) => acc + (t.estBytes || 0), 0),
+    // Only known figures are summed; the counts of unknown ones are reported beside them.
+    rows: includedTables.reduce((acc, t) => acc + (t.estRows ?? 0), 0),
+    rowsUnknown: includedTables.filter((t) => t.estRows == null).length,
+    bytes: includedTables.reduce((acc, t) => acc + (t.estBytes ?? 0), 0),
+    bytesUnknown: includedTables.filter((t) => t.estBytes == null).length,
     withFilter: includedTables.filter((t) => t.whereClause.trim() !== '').length,
+  };
+
+  const uncountedTables = tables.filter((t) => t.estRows == null);
+
+  // Refreshes every table's row count and size from the source. Each count is a full read of that
+  // table, so this is an explicit action, runs one table at a time, and can be stopped.
+  const runSync = async () => {
+    if (!connectionId || tables.length === 0) return;
+    const targets = tables.map((t) => ({ key: t.key, owner: t.owner, tableName: t.tableName }));
+    countingAbort.current = false;
+    setCounting({ done: 0, total: targets.length, failed: 0 });
+    setError(null);
+
+    let failed = 0;
+    let lastMessage = '';
+    for (let i = 0; i < targets.length; i++) {
+      if (countingAbort.current) break;
+      const target = targets[i];
+      try {
+        const result = await syncTableStats(Number(connectionId), target.owner, target.tableName);
+        // Update just this row as its figures land, so progress is visible.
+        setTables((ts) =>
+          ts.map((t) =>
+            t.key === target.key
+              ? {
+                  ...t,
+                  estRows: result.rows,
+                  rowsCountedAt: result.rowsCountedAt,
+                  // Keep the previous size if this table could not be measured.
+                  estBytes: result.bytes ?? t.estBytes,
+                  sizeIsEstimate: result.bytes == null ? t.sizeIsEstimate : result.sizeIsEstimate,
+                }
+              : t
+          )
+        );
+      } catch (err: any) {
+        // One unreadable table must not abandon the rest.
+        failed++;
+        lastMessage = err?.message || `Could not sync ${target.tableName}.`;
+      }
+      setCounting({ done: i + 1, total: targets.length, failed });
+    }
+
+    setCounting(null);
+    if (failed > 0) {
+      setError(`${failed} of ${targets.length} ${failed === 1 ? 'table' : 'tables'} could not be synced. ${lastMessage}`);
+    }
   };
 
   const canScan = !!connectionId && !!owner.trim();
@@ -383,11 +452,44 @@ export default function ManifestBuilder() {
           </div>
         </div>
         <div className="tb-actions">
-          <button type="button" className="tb-btn" onClick={handleRefreshDictionary} disabled={refreshing || !canScan}>
+          <button type="button" className="tb-btn" onClick={handleRefreshDictionary} disabled={refreshing || !!counting || !canScan}>
             <RefreshCw size={16} className={refreshing ? 'animate-spin' : ''} />
             Scan source database
           </button>
-          <button type="button" className="tb-btn tb-btn-primary" onClick={handleSave} disabled={saving || tables.length === 0}>
+
+          {counting ? (
+            <div className="tb-field">
+              <span className="tb-muted">
+                Syncing {counting.done.toLocaleString()} of {counting.total.toLocaleString()}
+                {counting.failed > 0 ? ` · ${counting.failed} failed` : ''}
+              </span>
+              <button type="button" className="tb-btn" onClick={() => { countingAbort.current = true; }}>
+                Stop
+              </button>
+            </div>
+          ) : (
+            tables.length > 0 && (
+              <button
+                type="button"
+                className="tb-btn"
+                onClick={runSync}
+                disabled={!connectionId || refreshing}
+                title={
+                  uncountedTables.length > 0
+                    ? `Reads the exact row count and current size of each table from the source. ${uncountedTables.length} ${uncountedTables.length === 1 ? 'table has' : 'tables have'} no row count yet. Each count reads the whole table, so this can take a while.`
+                    : 'Reads the exact row count and current size of each table from the source. Each count reads the whole table, so this can take a while.'
+                }
+              >
+                <RefreshCcw size={16} />
+                Sync counts &amp; sizes
+                {uncountedTables.length > 0 && (
+                  <span className="tb-seg-count">{uncountedTables.length.toLocaleString()} unknown</span>
+                )}
+              </button>
+            )
+          )}
+
+          <button type="button" className="tb-btn tb-btn-primary" onClick={handleSave} disabled={saving || !!counting || tables.length === 0}>
             <Save size={16} className={saving ? 'animate-spin' : ''} />
             Save selection
           </button>
@@ -504,6 +606,28 @@ export default function ManifestBuilder() {
             <button type="button" aria-pressed={statusFilter === 'unselected'} onClick={() => setStatusFilter('unselected')}>
               Unselected <span className="tb-seg-count">{searchedTables.length - searchedSelected}</span>
             </button>
+          </div>
+
+          <div className="tb-field">
+            <span className="tb-field-label">Rows</span>
+            <div className="tb-seg" role="group" aria-label="Sort by row count">
+              <button
+                type="button"
+                aria-pressed={sort?.key === 'estRows' && sort.dir === 'desc'}
+                onClick={() => setSort({ key: 'estRows', dir: 'desc' })}
+                title="Largest tables first. Tables with no row count go last."
+              >
+                Most first
+              </button>
+              <button
+                type="button"
+                aria-pressed={sort?.key === 'estRows' && sort.dir === 'asc'}
+                onClick={() => setSort({ key: 'estRows', dir: 'asc' })}
+                title="Smallest tables first. Tables with no row count go last."
+              >
+                Fewest first
+              </button>
+            </div>
           </div>
 
           <span className="tb-muted tb-spacer">

@@ -15,6 +15,10 @@ namespace O2P.Application.Interfaces
     /// </param>
     public sealed record SourceSchemaList(IReadOnlyList<SourceSchema> Schemas, int Skipped);
 
+    /// <param name="Bytes">Table size, or null when no source for it was readable.</param>
+    /// <param name="IsEstimate">True when it was estimated from statistics rather than measured.</param>
+    public sealed record TableSize(long? Bytes, bool IsEstimate);
+
     public interface IOracleDiscoveryService
     {
         Task<IEnumerable<DiscoveryCache>> DiscoverTablesAsync(Connection connection, string password, string owner, CancellationToken cancellationToken, IReadOnlyCollection<string>? tableNames = null);
@@ -25,5 +29,11 @@ namespace O2P.Application.Interfaces
         /// <see cref="DiscoverTablesAsync"/>, so the number shown is what a scan will find.
         /// </summary>
         Task<SourceSchemaList> ListSchemasAsync(Connection connection, string password, CancellationToken cancellationToken);
+
+        /// <summary>
+        /// Current size of one table, read the same way <see cref="DiscoverTablesAsync"/> reads it.
+        /// Used by the per-table Sync so a size can be refreshed without rescanning the schema.
+        /// </summary>
+        Task<TableSize> GetTableSizeAsync(Connection connection, string password, string owner, string tableName, CancellationToken cancellationToken);
     }
 }

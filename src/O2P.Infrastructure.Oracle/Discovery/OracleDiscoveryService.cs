@@ -30,6 +30,7 @@ namespace O2P.Infrastructure.Oracle.Discovery
                         TableName = "CUSTOMERS",
                         NumRows = 1500,
                         SegmentBytes = 256 * 1024,
+                        LobBytes = 64 * 1024,
                         IsPartitioned = false,
                         IsIot = false,
                         LastRefreshedAt = DateTimeOffset.UtcNow
@@ -39,8 +40,12 @@ namespace O2P.Infrastructure.Oracle.Discovery
                         ConnectionId = connection.Id,
                         Owner = owner.ToUpperInvariant(),
                         TableName = "ORDERS",
-                        NumRows = 4500,
+                        // Deliberately unknown: Oracle only fills NUM_ROWS once DBMS_STATS has run,
+                        // so the mock covers that state too and the UI's "Unknown" path is testable
+                        // without an Oracle instance. The size is an estimate for the same reason.
+                        NumRows = null,
                         SegmentBytes = 512 * 1024,
+                        SizeIsEstimate = true,
                         IsPartitioned = true,
                         IsIot = false,
                         LastRefreshedAt = DateTimeOffset.UtcNow
@@ -73,62 +78,29 @@ namespace O2P.Infrastructure.Oracle.Discovery
             using var conn = new OracleConnection(csb.ConnectionString);
             await conn.OpenAsync(cancellationToken);
 
-            // Enriched query adds segment/LOB sizes via ALL_SEGMENTS/ALL_LOBS. Those views are
-            // locked down on some hardened Oracle deploys (ORA-00942). Probe both views first so
-            // we never run the enriched query when it would throw (avoids VS first-chance noise).
-            string enrichedQuery = @"
-                WITH SegStats AS (
-                    SELECT segment_name, SUM(bytes) as segment_bytes
-                    FROM all_segments
-                    WHERE owner = :owner AND segment_type LIKE 'TABLE%'
-                    GROUP BY segment_name
-                ),
-                LobStats AS (
-                    SELECT l.table_name, SUM(s.bytes) as lob_bytes
-                    FROM all_lobs l
-                    JOIN all_segments s ON s.owner = l.owner AND s.segment_name = l.segment_name
-                    WHERE l.owner = :owner
-                    GROUP BY l.table_name
-                )
-                SELECT
-                    t.table_name,
-                    t.num_rows,
-                    s.segment_bytes,
-                    l.lob_bytes,
-                    t.partitioned,
-                    t.iot_type
-                FROM all_tables t
-                LEFT JOIN SegStats s ON t.table_name = s.segment_name
-                LEFT JOIN LobStats l ON t.table_name = l.table_name
-                WHERE t.owner = :owner
-                AND t.nested = 'NO'
-                AND (t.iot_type IS NULL OR t.iot_type = 'IOT')"; // Exclude IOT overflow
+            // Pick where table sizes come from. There is NO ALL_SEGMENTS view in Oracle - only
+            // DBA_SEGMENTS and USER_SEGMENTS - so the old probe of "all_segments" raised ORA-00942
+            // every time and every scan silently fell back to NULL bytes. That is why Size always
+            // read 0.00 MB. Order: DBA_SEGMENTS (any schema, needs the grant), USER_SEGMENTS (only
+            // our own schema, no grant), then an estimate from statistics, then unknown.
+            var sizeSource = await ResolveSizeSourceAsync(conn, connection, owner, cancellationToken);
+            var hasLobView = sizeSource != TableSizeSource.None
+                && await CanQueryAsync(conn, "SELECT 1 FROM all_lobs WHERE 1 = 0", cancellationToken);
 
-            string fallbackQuery = @"
-                SELECT
-                    t.table_name,
-                    t.num_rows,
-                    NULL as segment_bytes,
-                    NULL as lob_bytes,
-                    t.partitioned,
-                    t.iot_type
-                FROM all_tables t
-                WHERE t.owner = :owner
-                AND t.nested = 'NO'
-                AND (t.iot_type IS NULL OR t.iot_type = 'IOT')";
+            var query = BuildTableQuery(sizeSource, hasLobView);
 
             if (normalizedTableNames != null)
             {
                 var placeholders = string.Join(", ", normalizedTableNames.Select((_, i) => $":tn{i}"));
-                enrichedQuery += $" AND t.table_name IN ({placeholders})";
-                fallbackQuery += $" AND t.table_name IN ({placeholders})";
+                query += $" AND t.table_name IN ({placeholders})";
             }
 
-            var useEnriched = await CanQueryAsync(conn, "SELECT 1 FROM all_segments WHERE 1 = 0", cancellationToken)
-                && await CanQueryAsync(conn, "SELECT 1 FROM all_lobs WHERE 1 = 0", cancellationToken);
-
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = useEnriched ? enrichedQuery : fallbackQuery;
+            // Bind by name, not position: the size queries reference :owner more than once (the
+            // segment CTE, the LOB CTE and the main WHERE) while only one parameter is supplied.
+            // Positional binding would raise ORA-01008. The reader and chunk planner do the same.
+            cmd.BindByName = true;
+            cmd.CommandText = query;
             AddTableQueryParameters(cmd, owner, normalizedTableNames);
             var reader = (OracleDataReader)await cmd.ExecuteReaderAsync(cancellationToken);
 
@@ -141,13 +113,19 @@ namespace O2P.Infrastructure.Oracle.Discovery
                         ConnectionId = connection.Id,
                         Owner = owner.ToUpperInvariant(),
                         TableName = reader.GetString(0),
+                        // Null stays null: it means Oracle has no statistic, not that the table is empty.
                         NumRows = reader.IsDBNull(1) ? null : (long?)reader.GetDecimal(1),
                         SegmentBytes = reader.IsDBNull(2) ? null : (long?)reader.GetDecimal(2),
                         LobBytes = reader.IsDBNull(3) ? null : (long?)reader.GetDecimal(3),
                         IsPartitioned = !reader.IsDBNull(4) && reader.GetString(4) == "YES",
                         IsIot = !reader.IsDBNull(5),
+                        SizeIsEstimate = sizeSource == TableSizeSource.Estimate,
                         LastRefreshedAt = DateTimeOffset.UtcNow
                     };
+
+                    // A zero is kept, not turned into "Unknown". In Oracle NULL * anything is NULL,
+                    // so the estimate can only come out as 0 when the statistics themselves say the
+                    // table is empty - that is a known answer, and it is shown as one.
                     results.Add(cache);
                 }
             }
@@ -166,6 +144,7 @@ namespace O2P.Infrastructure.Oracle.Discovery
             colQuery += " ORDER BY table_name, column_id";
 
             using var colCmd = conn.CreateCommand();
+            colCmd.BindByName = true;
             colCmd.CommandText = colQuery;
             var colOwnerParam = colCmd.CreateParameter();
             colOwnerParam.ParameterName = "owner";
@@ -221,6 +200,163 @@ namespace O2P.Infrastructure.Oracle.Discovery
             return results;
         }
 
+        public async Task<TableSize> GetTableSizeAsync(
+            Connection connection, string password, string owner, string tableName, CancellationToken cancellationToken)
+        {
+            if (connection.Host.Equals("mock", StringComparison.OrdinalIgnoreCase))
+            {
+                // Matches the mock scan so a synced row lines up with what discovery reported.
+                return tableName.Equals("ORDERS", StringComparison.OrdinalIgnoreCase)
+                    ? new TableSize(512 * 1024, true)
+                    : new TableSize(256 * 1024, false);
+            }
+
+            var ownerUpper = owner.ToUpperInvariant();
+            var tableUpper = tableName.ToUpperInvariant();
+
+            using var conn = new OracleConnection(BuildConnectionString(connection, password).ConnectionString);
+            await conn.OpenAsync(cancellationToken);
+
+            var sizeSource = await ResolveSizeSourceAsync(conn, connection, ownerUpper, cancellationToken);
+            if (sizeSource == TableSizeSource.None) return new TableSize(null, false);
+
+            var sql = sizeSource switch
+            {
+                TableSizeSource.DbaSegments =>
+                    "SELECT SUM(bytes) FROM dba_segments WHERE owner = :owner AND segment_name = :tbl AND segment_type LIKE 'TABLE%'",
+                // USER_SEGMENTS has no owner column; it only ever describes the connected account.
+                TableSizeSource.UserSegments =>
+                    "SELECT SUM(bytes) FROM user_segments WHERE segment_name = :tbl AND segment_type LIKE 'TABLE%'",
+                _ =>
+                    "SELECT t.num_rows * t.avg_row_len FROM all_tables t WHERE t.owner = :owner AND t.table_name = :tbl",
+            };
+
+            using var cmd = conn.CreateCommand();
+            cmd.BindByName = true;
+            cmd.CommandText = sql;
+
+            if (sizeSource != TableSizeSource.UserSegments)
+            {
+                var ownerParam = cmd.CreateParameter();
+                ownerParam.ParameterName = "owner";
+                ownerParam.Value = ownerUpper;
+                cmd.Parameters.Add(ownerParam);
+            }
+
+            var tableParam = cmd.CreateParameter();
+            tableParam.ParameterName = "tbl";
+            tableParam.Value = tableUpper;
+            cmd.Parameters.Add(tableParam);
+
+            var raw = await cmd.ExecuteScalarAsync(cancellationToken);
+            // A zero is kept: it is a real answer, not a missing one.
+            var bytes = raw == null || raw == DBNull.Value ? (long?)null : Convert.ToInt64(raw);
+
+            return new TableSize(bytes, sizeSource == TableSizeSource.Estimate);
+        }
+
+        /// <summary>Where a scan was able to read table sizes from, best first.</summary>
+        private enum TableSizeSource
+        {
+            /// <summary>DBA_SEGMENTS - exact, any schema, needs the dictionary grant.</summary>
+            DbaSegments,
+            /// <summary>USER_SEGMENTS - exact, but only covers the connected account's own schema.</summary>
+            UserSegments,
+            /// <summary>NUM_ROWS * AVG_ROW_LEN from ALL_TABLES - approximate, needs statistics.</summary>
+            Estimate,
+            /// <summary>Nothing readable; size stays unknown.</summary>
+            None
+        }
+
+        private static async Task<TableSizeSource> ResolveSizeSourceAsync(
+            OracleConnection conn, Connection connection, string owner, CancellationToken cancellationToken)
+        {
+            if (await CanQueryAsync(conn, "SELECT 1 FROM dba_segments WHERE 1 = 0", cancellationToken))
+            {
+                return TableSizeSource.DbaSegments;
+            }
+
+            // USER_SEGMENTS only ever describes the connected account's own objects, so it is only
+            // usable when that account owns the schema being scanned.
+            var scanningOwnSchema = string.Equals(connection.Username?.Trim(), owner.Trim(), StringComparison.OrdinalIgnoreCase);
+            if (scanningOwnSchema && await CanQueryAsync(conn, "SELECT 1 FROM user_segments WHERE 1 = 0", cancellationToken))
+            {
+                return TableSizeSource.UserSegments;
+            }
+
+            // ALL_TABLES is always readable, but the columns the estimate needs are only populated
+            // once DBMS_STATS has run, so this yields a number for analysed tables only.
+            return TableSizeSource.Estimate;
+        }
+
+        /// <summary>
+        /// Builds the table query. Every variant returns the same six columns in the same order:
+        /// table_name, num_rows, segment_bytes, lob_bytes, partitioned, iot_type.
+        /// </summary>
+        private static string BuildTableQuery(TableSizeSource sizeSource, bool hasLobView)
+        {
+            const string tail = @"
+                WHERE t.owner = :owner
+                AND t.nested = 'NO'
+                AND (t.iot_type IS NULL OR t.iot_type = 'IOT')"; // Exclude IOT overflow
+
+            if (sizeSource == TableSizeSource.Estimate || sizeSource == TableSizeSource.None)
+            {
+                var bytes = sizeSource == TableSizeSource.Estimate
+                    ? "t.num_rows * t.avg_row_len"
+                    : "NULL";
+
+                return $@"
+                SELECT
+                    t.table_name,
+                    t.num_rows,
+                    {bytes} as segment_bytes,
+                    NULL as lob_bytes,
+                    t.partitioned,
+                    t.iot_type
+                FROM all_tables t{tail}";
+            }
+
+            // USER_SEGMENTS has no owner column; DBA_SEGMENTS does. Otherwise identical.
+            var isDba = sizeSource == TableSizeSource.DbaSegments;
+            var segView = isDba ? "dba_segments" : "user_segments";
+            var segOwnerFilter = isDba ? "owner = :owner AND " : string.Empty;
+            var lobJoinOwner = isDba ? "s.owner = l.owner AND " : string.Empty;
+
+            // A partitioned table has one segment per partition, so the sum is over all of them.
+            var lobCte = hasLobView
+                ? $@",
+                LobStats AS (
+                    SELECT l.table_name, SUM(s.bytes) as lob_bytes
+                    FROM all_lobs l
+                    JOIN {segView} s ON {lobJoinOwner}s.segment_name = l.segment_name
+                    WHERE l.owner = :owner
+                    GROUP BY l.table_name
+                )"
+                : string.Empty;
+
+            var lobSelect = hasLobView ? "l.lob_bytes" : "NULL";
+            var lobJoin = hasLobView ? "LEFT JOIN LobStats l ON t.table_name = l.table_name" : string.Empty;
+
+            return $@"
+                WITH SegStats AS (
+                    SELECT segment_name, SUM(bytes) as segment_bytes
+                    FROM {segView}
+                    WHERE {segOwnerFilter}segment_type LIKE 'TABLE%'
+                    GROUP BY segment_name
+                ){lobCte}
+                SELECT
+                    t.table_name,
+                    t.num_rows,
+                    s.segment_bytes,
+                    {lobSelect} as lob_bytes,
+                    t.partitioned,
+                    t.iot_type
+                FROM all_tables t
+                LEFT JOIN SegStats s ON t.table_name = s.segment_name
+                {lobJoin}{tail}";
+        }
+
         // Oracle's built-in schemas, for databases old enough to lack ALL_USERS.ORACLE_MAINTAINED
         // (added in 12.1). Only used as a fallback; the column is authoritative where it exists.
         private static readonly string[] KnownSystemSchemas =
@@ -251,7 +387,7 @@ namespace O2P.Infrastructure.Oracle.Discovery
             await conn.OpenAsync(cancellationToken);
 
             // ORACLE_MAINTAINED needs 12.1+; on 11g the column does not exist (ORA-00904). Probe first,
-            // the same way discovery probes ALL_SEGMENTS/ALL_LOBS, rather than running a query that throws.
+            // the same way discovery probes its segment and LOB views, rather than running a query that throws.
             var hasOracleMaintained = await CanQueryAsync(conn, "SELECT oracle_maintained FROM all_users WHERE 1 = 0", cancellationToken);
             var systemFilter = hasOracleMaintained
                 ? "AND t.owner IN (SELECT username FROM all_users WHERE oracle_maintained = 'N')"

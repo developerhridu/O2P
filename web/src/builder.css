@@ -452,6 +452,13 @@
   text-align: center;
 }
 
+/* Only for a genuinely unknown value. A known 0 is a real answer and renders as a normal figure. */
+.tb-unknown {
+  color: var(--text-secondary);
+  font-style: italic;
+  font-variant-numeric: normal;
+}
+
 .tb-checkbox {
   width: 16px;
   height: 16px;

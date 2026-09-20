@@ -371,7 +371,7 @@ Best when you want only some tables, or want to filter rows.
 │ │ EMPLOYEES, DEPARTMENTS                        │  [Add Tables]               │
 │ └───────────────────────────────────────────────┘                             │
 │ [ Search tables... ]                                                          │
-│ ☑ Owner  Table Name     Est. Rows  Size (MB)  LOBs  Filter (WHERE)     Remove │
+│ ☑ Schema Table          Rows       Size       LOB   Row filter         ✕      │
 │ ☑ HR     EMPLOYEES        107,000       12      —    [ YEAR = 2024 ]     🗑    │
 │ ☑ HR     DOCUMENTS   NO COLUMNS  9,000    800   LOB   [              ]   🗑    │
 │ ☐ HR     AUDIT_LOG        5,200,000    900      —    [ (disabled)   ]    🗑    │
@@ -391,8 +391,8 @@ Best when you want only some tables, or want to filter rows.
 |---|---|
 | ☑ checkbox | Tick to migrate, untick to skip |
 | **Owner**, **Table Name** | Read-only. An amber **NO COLUMNS** tag means O2P could not read the column list — see below |
-| **Est. Rows**, **Size (MB)** | Estimates from Oracle statistics; use them to judge run time |
-| **LOBs** | A red **LOB** tag means the table has CLOB/BLOB-type columns (slower, memory-heavy) |
+| **Rows**, **Size** | What Oracle knows about each table; use them to judge run time. **Unknown** means Oracle has no statistics for that table - it does **not** mean the table is empty, and a real  is shown as . A  marks a size estimated from statistics rather than measured. Use **Sync counts & sizes** to replace Unknown with exact figures. |
+| **Large objects** | A red **LOB** tag means the table has CLOB/BLOB-type columns (slower, memory-heavy) |
 | **Filter (WHERE)** | Optional row filter for this table (disabled while unticked) |
 | Trash icon (**Remove from table selection**) | Delete the row from the list |
 
@@ -455,7 +455,7 @@ There is **no UI to change column types or exclude columns**; O2P chooses automa
 ┌─ Start a run ────────────────────────────────┐
 │ Source Slot           [ Oracle Test        ▾ ]        │
 │ Target Slot           [ Postgres Test      ▾ ]        │
-│ Target Postgres Schema[ public               ]        │
+│ Destination schema   [ public              ▾ ]        │
 │                                 [Cancel] [Start run]
 └───────────────────────────────────────────────────────┘
 ```
@@ -463,7 +463,7 @@ There is **no UI to change column types or exclude columns**; O2P chooses automa
 2. Choose:
    - **Source Slot** — `Oracle Test` or `Oracle Live`
    - **Target Slot** — `Postgres Test` or `Postgres Live`
-   - **Target Postgres Schema** — default `public`; it **must already exist**
+   - **Destination schema** — a dropdown of the schemas in the database you picked under **Copy to**, each marked with whether your account can create tables in it. It **must already exist** (O2P does not create schemas), and the list changes when you change **Copy to**. Default `public`. A schema that is not listed can still be typed.
 3. Click **Start run**. (It is disabled if no Oracle or no PostgreSQL profile exists at all.)
 
 ### 9.1 What happens on launch
@@ -582,7 +582,7 @@ Click **View Details**, or you land here after launching. The page refreshes eve
 
 ### 10.4 How long will it take?
 
-There is no ETA. Use **Est. Rows** from the table selection and the *Active Rate* card to estimate. Throughput is capped at roughly 50,000 rows/second across the whole Worker, and tables are prepared one after another. LOB-heavy tables are much slower. You can close the browser; the job continues in the Worker.
+There is no ETA. Use **Rows** from the table selection and the *Active Rate* card to estimate. Throughput is capped at roughly 50,000 rows/second across the whole Worker, and tables are prepared one after another. LOB-heavy tables are much slower. You can close the browser; the job continues in the Worker.
 
 ---
 
@@ -675,7 +675,7 @@ Goal: copy Oracle schema `HR` to PostgreSQL schema `hr_target` in database `TARG
 5. **Databases**: **Assign** `Oracle Test` → `Oracle HR Test`; **Assign** `Postgres Test` → `Postgres HR Target`.
 6. Click **Choose Tables**. Choose *Oracle HR Test*, type owner `HR`, click **Scan source database**.
 7. Untick tables you do not need; check that none says **NO COLUMNS**; add a filter on a large table if you only want recent rows. Click **Save selection**. Go back to the migration (← arrow).
-8. On the table selection click **Start Run**. Source Slot **Oracle Test**, Target Slot **Postgres Test**, Target Postgres Schema `hr_target` → **Start run**.
+8. On the table selection click **Start Run**. Source Slot **Oracle Test**, Target Slot **Postgres Test**, Destination schema `hr_target` → **Start run**.
 9. You arrive on **Run Details** with status **Queued**, then **Running**. Expand a table to watch the batch heatmap turn green.
 10. Wait for status **Completed**. Expand each table and confirm **Count verification passed**.
 11. In PostgreSQL run the checks from [11.2](#112-your-own-checks-in-postgresql), then hand over to the DBA to add primary keys, indexes, foreign keys and sequences.

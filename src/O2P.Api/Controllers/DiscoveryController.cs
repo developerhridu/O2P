@@ -85,6 +85,91 @@ namespace O2P.Api.Controllers
             }
         }
 
+        /// <summary>
+        /// Brings one table's figures up to date: an exact COUNT(*) plus its current size. One table
+        /// per call so the UI can show progress and stop part-way; a batch over a whole schema would
+        /// risk an HTTP timeout and could not be interrupted.
+        /// </summary>
+        [HttpPost("sync")]
+        [Authorize(Roles = "Admin,Operator")]
+        public async Task<IActionResult> SyncTable(
+            long connectionId,
+            [FromQuery] string owner,
+            [FromQuery] string table,
+            [FromServices] ISourceCountExecutor countExecutor,
+            CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrWhiteSpace(owner)) return BadRequest("A source schema name is required.");
+            if (string.IsNullOrWhiteSpace(table)) return BadRequest("A table name is required.");
+
+            var conn = await _db.Connections.FindAsync(new object[] { connectionId }, cancellationToken);
+            if (conn == null || conn.Kind != O2P.Domain.Enums.ConnectionKind.Oracle)
+                return BadRequest("That database does not exist.");
+
+            string password;
+            try
+            {
+                password = _secretProtector.Unprotect(conn.SecretCiphertext ?? System.Array.Empty<byte>());
+            }
+            catch (System.Exception ex)
+            {
+                return BadRequest($"Could not decrypt stored credentials for this connection: {ex.Message}. Re-enter the connection's password and try again.");
+            }
+
+            var ownerUpper = owner.ToUpper();
+            var tableUpper = table.ToUpper();
+
+            long rows;
+            try
+            {
+                // Counts the whole table, ignoring any row filter, so the number means the same
+                // thing as the Size column: how big the source table is.
+                rows = await countExecutor.GetRowCountAsync(conn, password, ownerUpper, tableUpper, null, cancellationToken);
+            }
+            catch (System.Exception ex)
+            {
+                return BadRequest($"Could not count {tableUpper}: {ex.Message}");
+            }
+
+            // The size is refreshed too, but a table that cannot be measured must not fail the sync -
+            // the count is still worth keeping.
+            TableSize size;
+            try
+            {
+                size = await _discoveryService.GetTableSizeAsync(conn, password, ownerUpper, tableUpper, cancellationToken);
+            }
+            catch
+            {
+                size = new TableSize(null, false);
+            }
+
+            var countedAt = System.DateTimeOffset.UtcNow;
+            var cached = await _db.DiscoveryCaches
+                .FirstOrDefaultAsync(c => c.ConnectionId == connectionId && c.Owner == ownerUpper && c.TableName == tableUpper, cancellationToken);
+            if (cached != null)
+            {
+                cached.NumRows = rows;
+                cached.RowsCountedAt = countedAt;
+                if (size.Bytes.HasValue)
+                {
+                    cached.SegmentBytes = size.Bytes;
+                    cached.SizeIsEstimate = size.IsEstimate;
+                }
+                cached.LastRefreshedAt = countedAt;
+                await _db.SaveChangesAsync(cancellationToken);
+            }
+
+            return Ok(new
+            {
+                owner = ownerUpper,
+                tableName = tableUpper,
+                rows,
+                rowsCountedAt = countedAt,
+                bytes = size.Bytes,
+                sizeIsEstimate = size.IsEstimate
+            });
+        }
+
         [HttpPost("refresh")]
         [Authorize(Roles = "Admin,Operator")]
         public async Task<IActionResult> RefreshDiscovery(long connectionId, [FromQuery] string owner, [FromBody] RefreshDiscoveryRequest? request, CancellationToken cancellationToken)
@@ -169,8 +254,11 @@ namespace O2P.Api.Controllers
                 owner = cache.Owner,
                 tableName = cache.TableName,
                 included = true,
+                // Null means "Oracle does not know", not zero. The UI shows "Unknown".
                 estRows = cache.NumRows,
                 estBytes = cache.SegmentBytes,
+                sizeIsEstimate = cache.SizeIsEstimate,
+                rowsCountedAt = cache.RowsCountedAt,
                 hasLobs = cache.LobBytes.HasValue && cache.LobBytes.Value > 0,
                 isPartitioned = cache.IsPartitioned,
                 isIot = cache.IsIot,

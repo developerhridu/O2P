@@ -1,6 +1,24 @@
+/**
+ * What a figure reads as when we genuinely do not know it. Never a dash and never 0: Oracle only
+ * knows a table's row count once DBMS_STATS has gathered statistics, and showing 0 for that made a
+ * never-analysed table look empty.
+ */
+export const UNKNOWN_LABEL = 'Unknown';
+
 /** Number with thousands separators, in the viewer's locale. */
 export function formatCount(n: number): string {
   return n.toLocaleString();
+}
+
+/** Row count, or "Unknown" when Oracle has no statistic for the table. */
+export function formatRows(n: number | null | undefined): string {
+  return n == null ? UNKNOWN_LABEL : n.toLocaleString();
+}
+
+/** Size, or "Unknown" when no size could be read. `~` marks an estimate. */
+export function formatSize(bytes: number | null | undefined, isEstimate = false): string {
+  if (bytes == null) return UNKNOWN_LABEL;
+  return (isEstimate ? '~' : '') + formatBytes(bytes);
 }
 
 /** Bytes as a human-readable size, picking the unit that keeps the number small. */

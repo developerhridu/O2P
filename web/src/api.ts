@@ -243,6 +243,17 @@ export async function fetchDiscoveredTables(connectionId: number, owner: string)
 export type SourceSchema = { name: string; tableCount: number };
 export type SourceSchemaList = { schemas: SourceSchema[]; skipped: number };
 
+export type TargetSchema = { name: string; canCreate: boolean };
+
+// Schemas in a PostgreSQL destination that this account can use, for the destination picker.
+export async function fetchTargetSchemas(connectionId: number): Promise<{ schemas: TargetSchema[] }> {
+  const res = await apiFetch(`${API_BASE}/connections/${connectionId}/schemas`, {
+    headers: getHeaders()
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, 'Could not load the schemas.'));
+  return res.json();
+}
+
 // The schemas the source account can read tables from, for the schema picker.
 export async function fetchSchemas(connectionId: number): Promise<SourceSchemaList> {
   const res = await apiFetch(`${API_BASE}/connections/${connectionId}/discovery/schemas`, {
@@ -250,6 +261,26 @@ export async function fetchSchemas(connectionId: number): Promise<SourceSchemaLi
   });
   if (!res.ok) throw new Error(await readErrorMessage(res, 'Could not load the schemas.'));
   return res.json();
+}
+
+export type TableSync = {
+  owner: string;
+  tableName: string;
+  rows: number;
+  rowsCountedAt: string;
+  bytes: number | null;
+  sizeIsEstimate: boolean;
+};
+
+// Brings one table's row count and size up to date. One per call so the UI can show progress and
+// be stopped part-way; counting a whole schema in a single request could not be interrupted.
+export async function syncTableStats(connectionId: number, owner: string, table: string) {
+  const res = await apiFetch(
+    `${API_BASE}/connections/${connectionId}/discovery/sync?owner=${encodeURIComponent(owner)}&table=${encodeURIComponent(table)}`,
+    { method: 'POST', headers: getHeaders() }
+  );
+  if (!res.ok) throw new Error(await readErrorMessage(res, `Could not sync ${table}.`));
+  return res.json() as Promise<TableSync>;
 }
 
 // tableNames omitted/empty -> full schema scan (replaces the owner's whole cache).

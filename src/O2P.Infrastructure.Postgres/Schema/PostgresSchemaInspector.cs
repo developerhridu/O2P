@@ -73,6 +73,46 @@ ORDER BY a.attnum;";
             return columns;
         }
 
+        public async Task<IReadOnlyList<TargetSchema>> ListSchemasAsync(
+            Connection connection,
+            string password,
+            CancellationToken cancellationToken)
+        {
+            if (PostgresConnectionFactory.IsMock(connection))
+            {
+                return new[]
+                {
+                    new TargetSchema("public", true),
+                    new TargetSchema("reporting", true),
+                    new TargetSchema("readonly_archive", false),
+                };
+            }
+
+            await using var conn = await PostgresConnectionFactory.OpenAsync(connection, password, cancellationToken);
+            await using var cmd = conn.CreateCommand();
+
+            // USAGE is the minimum a run needs; without it nothing in the schema is reachable, so
+            // offering it would only produce a readiness-check failure later. CREATE is reported
+            // rather than required, because a run into existing tables does not need it.
+            cmd.CommandText = @"
+SELECT n.nspname,
+       has_schema_privilege(n.nspname, 'CREATE') AS can_create
+FROM pg_namespace n
+WHERE n.nspname NOT LIKE 'pg\_%'
+  AND n.nspname <> 'information_schema'
+  AND has_schema_privilege(n.nspname, 'USAGE')
+ORDER BY n.nspname;";
+
+            var schemas = new List<TargetSchema>();
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                schemas.Add(new TargetSchema(reader.GetString(0), reader.GetBoolean(1)));
+            }
+
+            return schemas;
+        }
+
         public async Task<IReadOnlyCollection<string>> GetExistingTableNamesAsync(
             Connection connection,
             string password,

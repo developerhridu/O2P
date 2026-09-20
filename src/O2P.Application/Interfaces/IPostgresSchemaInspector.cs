@@ -12,8 +12,24 @@ namespace O2P.Application.Interfaces
     /// no-ops for mock connections, and there is no correct neutral value for column introspection
     /// (an empty list would report every manifest column as missing).
     /// </summary>
+    /// <param name="Name">Schema name, exactly as Postgres stores it.</param>
+    /// <param name="CanCreate">
+    /// Whether this account may create tables in it. A run only needs this for tables that do not
+    /// exist yet, so a read-only schema is still usable - it is shown, just marked.
+    /// </param>
+    public sealed record TargetSchema(string Name, bool CanCreate);
+
     public interface IPostgresSchemaInspector
     {
+        /// <summary>
+        /// Schemas in the destination database that this account can use, for the destination
+        /// picker. Postgres' own schemas (pg_*, information_schema) are left out.
+        /// </summary>
+        Task<IReadOnlyList<TargetSchema>> ListSchemasAsync(
+            Connection connection,
+            string password,
+            CancellationToken cancellationToken);
+
         /// <summary>
         /// Columns as they actually exist in the target table, or null when the target cannot be
         /// introspected at all (mock connections). Callers must skip compatibility checking on null
