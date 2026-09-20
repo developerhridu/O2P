@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { ArrowLeft, Search, Save, RefreshCw, Plus } from 'lucide-react';
+import { ArrowLeft, ChevronDown, Plus, RefreshCw, Save, Search, SearchX, Table2 } from 'lucide-react';
 import {
   createManifest,
   fetchConnections,
@@ -8,6 +8,11 @@ import {
   refreshDiscovery,
   updateManifestTables,
 } from '../api';
+import SchemaCombobox from '../components/SchemaCombobox';
+import TableGrid, { type SortKey, type SortState } from '../components/TableGrid';
+import '../builder.css';
+
+type StatusFilter = 'all' | 'selected' | 'unselected';
 
 type BuilderColumn = {
   columnName: string;
@@ -89,6 +94,14 @@ export default function ManifestBuilder() {
 
   const [saving, setSaving] = useState(false);
 
+  // View-only state: none of this is saved or sent to the API.
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  const [sort, setSort] = useState<SortState>(null);
+  const [addOpen, setAddOpen] = useState(false);
+  const addWrapRef = useRef<HTMLDivElement>(null);
+  const addBtnRef = useRef<HTMLButtonElement>(null);
+  const addTextRef = useRef<HTMLTextAreaElement>(null);
+
   useEffect(() => {
     (async () => {
       setLoading(true);
@@ -128,19 +141,82 @@ export default function ManifestBuilder() {
     setTables((ts) => ts.filter((t) => t.key !== key));
   };
 
-  const filteredTables = useMemo(
-    () =>
-      tables.filter(
-        (t) =>
-          t.tableName.toLowerCase().includes(search.toLowerCase()) ||
-          t.owner.toLowerCase().includes(search.toLowerCase())
-      ),
-    [tables, search]
-  );
+  // Search first, then the All / Selected / Unselected split. The split's counts are taken over the
+  // searched set so that they always add up to what "All" shows.
+  const searchedTables = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return tables;
+    return tables.filter((t) => t.tableName.toLowerCase().includes(q) || t.owner.toLowerCase().includes(q));
+  }, [tables, search]);
+
+  const searchedSelected = useMemo(() => searchedTables.filter((t) => t.included).length, [searchedTables]);
+
+  const visibleTables = useMemo(() => {
+    const byStatus =
+      statusFilter === 'all'
+        ? searchedTables
+        : searchedTables.filter((t) => (statusFilter === 'selected' ? t.included : !t.included));
+    if (!sort) return byStatus;
+
+    const dir = sort.dir === 'asc' ? 1 : -1;
+    const compare = (a: BuilderTable, b: BuilderTable) => {
+      switch (sort.key) {
+        case 'estRows':
+          return ((a.estRows ?? 0) - (b.estRows ?? 0)) * dir;
+        case 'estBytes':
+          return ((a.estBytes ?? 0) - (b.estBytes ?? 0)) * dir;
+        default:
+          // numeric: true so BL_2 sorts before BL_10.
+          return a[sort.key].localeCompare(b[sort.key], undefined, { numeric: true, sensitivity: 'base' }) * dir;
+      }
+    };
+    return [...byStatus].sort(compare);
+  }, [searchedTables, statusFilter, sort]);
+
+  // none -> ascending -> descending -> none
+  const handleSort = (key: SortKey) => {
+    setSort((prev) => {
+      if (!prev || prev.key !== key) return { key, dir: 'asc' };
+      return prev.dir === 'asc' ? { key, dir: 'desc' } : null;
+    });
+  };
+
+  // Acts on the rows currently shown, so search + select-all selects only the matches.
+  const handleToggleAll = (next: boolean) => {
+    const shown = new Set(visibleTables.map((t) => t.key));
+    setTables((ts) => ts.map((t) => (shown.has(t.key) ? { ...t, included: next } : t)));
+  };
+
+  const clearFilters = () => {
+    setSearch('');
+    setStatusFilter('all');
+  };
+
+  // Add-tables popover: Escape or an outside click closes it, and it takes focus while open.
+  useEffect(() => {
+    if (!addOpen) return;
+    addTextRef.current?.focus();
+
+    const onMouseDown = (e: MouseEvent) => {
+      if (!addWrapRef.current?.contains(e.target as Node)) setAddOpen(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setAddOpen(false);
+        addBtnRef.current?.focus();
+      }
+    };
+    document.addEventListener('mousedown', onMouseDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onMouseDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [addOpen]);
 
   const handleRefreshDictionary = async () => {
     if (!connectionId || !owner.trim()) {
-      alert('Choose a source database and type a schema name first.');
+      alert('Choose a source database and a schema first.');
       return;
     }
     setRefreshing(true);
@@ -158,7 +234,7 @@ export default function ManifestBuilder() {
 
   const handleAddCustomTables = async () => {
     if (!connectionId || !owner.trim()) {
-      alert('Choose a source database and type a schema name first.');
+      alert('Choose a source database and a schema first.');
       return;
     }
     const names = customTablesText
@@ -179,6 +255,7 @@ export default function ManifestBuilder() {
       } else {
         setTables((prev) => mergeTables(prev, discovered));
         setCustomTablesText('');
+        setAddOpen(false);
       }
     } catch (err: any) {
       setError(err.message || 'Could not add those tables.');
@@ -241,15 +318,54 @@ export default function ManifestBuilder() {
     );
   }
 
-  const includedCount = tables.filter((t) => t.included).length;
-  const totalRows = tables.filter((t) => t.included).reduce((acc, t) => acc + (t.estRows || 0), 0);
-  const totalBytes = tables.filter((t) => t.included).reduce((acc, t) => acc + (t.estBytes || 0), 0);
+  const includedTables = tables.filter((t) => t.included);
+  const stats = {
+    selected: includedTables.length,
+    total: tables.length,
+    rows: includedTables.reduce((acc, t) => acc + (t.estRows || 0), 0),
+    bytes: includedTables.reduce((acc, t) => acc + (t.estBytes || 0), 0),
+    withFilter: includedTables.filter((t) => t.whereClause.trim() !== '').length,
+  };
+
+  const canScan = !!connectionId && !!owner.trim();
+  const resetKey = `${search}|${statusFilter}|${sort ? `${sort.key}:${sort.dir}` : 'none'}`;
+
+  const emptyState =
+    tables.length === 0 ? (
+      <div className="tb-empty">
+        <Table2 size={40} />
+        <div className="tb-empty-title">No tables in this selection yet</div>
+        <p>Scan the source schema to list everything in it, or add specific tables by name.</p>
+        <div className="tb-empty-actions">
+          <button type="button" className="tb-btn tb-btn-primary" onClick={handleRefreshDictionary} disabled={refreshing || !canScan}>
+            <RefreshCw size={16} className={refreshing ? 'animate-spin' : ''} />
+            Scan source database
+          </button>
+          <button type="button" className="tb-btn" onClick={() => setAddOpen(true)}>
+            <Plus size={16} />
+            Add tables
+          </button>
+        </div>
+        {!canScan && <p className="tb-muted">Choose a source database and a schema first.</p>}
+      </div>
+    ) : (
+      <div className="tb-empty">
+        <SearchX size={40} />
+        <div className="tb-empty-title">No tables match</div>
+        <p>Nothing matches the current search and filter.</p>
+        <div className="tb-empty-actions">
+          <button type="button" className="tb-btn" onClick={clearFilters}>
+            Clear search and filter
+          </button>
+        </div>
+      </div>
+    );
 
   return (
-    <div className="flex flex-col h-[calc(100vh-8rem)]">
-      <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
-        <div className="flex items-center gap-4">
-          <Link to={`/applications/${appId}`} className="p-2 hover:bg-slate-800 rounded-lg text-slate-400 transition-colors">
+    <div className="page-fill">
+      <div className="tb-header">
+        <div className="tb-title-block">
+          <Link to={`/applications/${appId}`} className="tb-back" aria-label="Back to migration" title="Back to migration">
             <ArrowLeft size={20} />
           </Link>
           <div>
@@ -257,28 +373,21 @@ export default function ManifestBuilder() {
               <input
                 value={manifestName}
                 onChange={(e) => setManifestName(e.target.value)}
-                className="bg-transparent text-2xl font-bold tracking-tight border-b border-transparent hover:border-slate-700 focus:border-blue-500 focus:outline-none"
+                className="tb-title-input"
+                aria-label="Table selection name"
               />
             ) : (
-              <h1 className="text-2xl font-bold tracking-tight">{manifestName || 'Select tables'}</h1>
+              <h1 className="tb-title">{manifestName || 'Select tables'}</h1>
             )}
-            <p className="text-slate-400 text-sm mt-1">Pick the tables to copy, and filter their rows if you need to</p>
+            <p className="tb-subtitle">Pick the tables to copy, and filter their rows if you need to.</p>
           </div>
         </div>
-        <div className="flex items-center gap-3">
-          <button
-            className="flex items-center gap-2 px-4 py-2 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 rounded-lg transition-colors font-medium disabled:opacity-50"
-            onClick={handleRefreshDictionary}
-            disabled={refreshing || !connectionId || !owner.trim()}
-          >
+        <div className="tb-actions">
+          <button type="button" className="tb-btn" onClick={handleRefreshDictionary} disabled={refreshing || !canScan}>
             <RefreshCw size={16} className={refreshing ? 'animate-spin' : ''} />
             Scan source database
           </button>
-          <button
-            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors font-medium shadow-lg shadow-blue-900/20 disabled:opacity-50"
-            onClick={handleSave}
-            disabled={saving || tables.length === 0}
-          >
+          <button type="button" className="tb-btn tb-btn-primary" onClick={handleSave} disabled={saving || tables.length === 0}>
             <Save size={16} className={saving ? 'animate-spin' : ''} />
             Save selection
           </button>
@@ -286,20 +395,22 @@ export default function ManifestBuilder() {
       </div>
 
       {error && (
-        <div className="mb-4 rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-200">{error}</div>
+        <div className="tb-error" role="alert">
+          {error}
+        </div>
       )}
 
-      {/* Discovery source + custom table entry */}
-      <div className="mb-6 bg-slate-950 p-4 rounded-xl border border-slate-800 flex flex-col gap-4">
-        <div className="flex flex-wrap items-end gap-4">
-          <div className="min-w-[220px]">
-            <label className="block text-xs font-medium text-slate-400 mb-1">Oracle Connection</label>
+      <div className="tb-card">
+        <div className="tb-toolbar">
+          <div className="tb-field">
+            <label className="tb-field-label" htmlFor="tb-source-db">Source database</label>
             <select
-              className="w-full bg-slate-900 border border-slate-700 rounded-lg py-2 px-3 text-sm focus:outline-none focus:border-blue-500"
+              id="tb-source-db"
+              className="tb-select"
               value={connectionId}
               onChange={(e) => setConnectionId(Number(e.target.value))}
             >
-              <option value="">Select Oracle profile</option>
+              <option value="">Select a source database</option>
               {oracleConnections.map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.name}
@@ -307,148 +418,112 @@ export default function ManifestBuilder() {
               ))}
             </select>
           </div>
-          <div className="min-w-[160px]">
-            <label className="block text-xs font-medium text-slate-400 mb-1">Source schema</label>
-            <input
-              className="w-full bg-slate-900 border border-slate-700 rounded-lg py-2 px-3 text-sm focus:outline-none focus:border-blue-500"
-              placeholder="HR"
+
+          <div className="tb-field">
+            <label className="tb-field-label" htmlFor="tb-source-schema">Source schema</label>
+            <SchemaCombobox
+              id="tb-source-schema"
+              className="tb-schema-box"
+              connectionId={connectionId}
               value={owner}
-              onChange={(e) => setOwner(e.target.value.toUpperCase())}
+              onChange={setOwner}
             />
           </div>
+
+          <div className="tb-popover-wrap" ref={addWrapRef}>
+            <button
+              ref={addBtnRef}
+              type="button"
+              className="tb-btn"
+              aria-haspopup="dialog"
+              aria-expanded={addOpen}
+              onClick={() => setAddOpen((o) => !o)}
+            >
+              <Plus size={16} />
+              Add tables
+              <ChevronDown size={14} />
+            </button>
+
+            {addOpen && (
+              <div className="tb-popover" role="dialog" aria-label="Add specific tables">
+                <h2 className="tb-popover-title">Add specific tables</h2>
+                <p className="tb-popover-hint">
+                  Not limited to a full schema scan. One table name per line, or comma-separated.
+                </p>
+                <textarea
+                  ref={addTextRef}
+                  className="tb-textarea"
+                  placeholder={'EMPLOYEES, DEPARTMENTS\nINVOICES'}
+                  value={customTablesText}
+                  onChange={(e) => setCustomTablesText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                      e.preventDefault();
+                      handleAddCustomTables();
+                    }
+                  }}
+                />
+                <div className="tb-popover-actions">
+                  <span className="tb-muted">Ctrl + Enter to add</span>
+                  <button
+                    type="button"
+                    className="tb-btn tb-btn-primary"
+                    onClick={handleAddCustomTables}
+                    disabled={addingCustom || !canScan || !customTablesText.trim()}
+                  >
+                    <Plus size={16} className={addingCustom ? 'animate-spin' : ''} />
+                    Add tables
+                  </button>
+                </div>
+                {!canScan && <p className="tb-popover-hint" style={{ marginTop: 8 }}>Choose a source database and a schema first.</p>}
+              </div>
+            )}
+          </div>
         </div>
 
-        <div className="flex flex-wrap items-end gap-3">
-          <div className="flex-1 min-w-[260px]">
-            <label className="block text-xs font-medium text-slate-400 mb-1">
-              Add specific tables (dynamic - not limited to a full schema scan)
-            </label>
-            <textarea
-              className="w-full bg-slate-900 border border-slate-700 rounded-lg py-2 px-3 text-sm focus:outline-none focus:border-blue-500 font-mono"
-              rows={2}
-              placeholder={'One table per line or comma-separated, e.g.\nEMPLOYEES, DEPARTMENTS\nINVOICES'}
-              value={customTablesText}
-              onChange={(e) => setCustomTablesText(e.target.value)}
+        <div className="tb-toolbar">
+          <div className="tb-search">
+            <Search size={16} />
+            <input
+              type="text"
+              className="tb-input"
+              placeholder="Search tables"
+              aria-label="Search tables"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
             />
           </div>
-          <button
-            className="flex items-center gap-2 px-4 py-2 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 rounded-lg transition-colors font-medium disabled:opacity-50 h-fit"
-            onClick={handleAddCustomTables}
-            disabled={addingCustom || !connectionId || !owner.trim() || !customTablesText.trim()}
-          >
-            <Plus size={16} className={addingCustom ? 'animate-spin' : ''} />
-            Add Tables
-          </button>
-        </div>
-      </div>
 
-      {/* Toolbar */}
-      <div className="flex items-center gap-4 mb-6 bg-slate-950 p-4 rounded-xl border border-slate-800">
-        <div className="relative flex-1">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" size={18} />
-          <input
-            type="text"
-            placeholder="Search tables..."
-            className="w-full bg-slate-900 border border-slate-700 rounded-lg py-2 pl-10 pr-4 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all text-sm"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
-        </div>
-      </div>
-
-      {/* Data Grid */}
-      <div className="flex-1 bg-slate-950 border border-slate-800 rounded-xl overflow-hidden flex flex-col">
-        <div className="overflow-x-auto flex-1">
-          <table className="w-full text-left text-sm whitespace-nowrap">
-            <thead className="bg-slate-900/80 text-slate-400 sticky top-0 z-10 shadow-sm border-b border-slate-800">
-              <tr>
-                <th className="p-4 w-12 text-center"></th>
-                <th className="p-4 font-medium">Schema</th>
-                <th className="p-4 font-medium">Table Name</th>
-                <th className="p-4 font-medium text-right">Rows (approx.)</th>
-                <th className="p-4 font-medium text-right">Size (MB)</th>
-                <th className="p-4 font-medium text-center">Large objects</th>
-                <th className="p-4 font-medium w-48">Row filter</th>
-                <th className="p-4 font-medium w-16"></th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-800/50">
-              {filteredTables.map((row) => (
-                <tr key={row.key} className={`hover:bg-slate-900/40 transition-colors ${row.included ? 'bg-blue-900/5' : ''}`}>
-                  <td className="p-4 text-center">
-                    <input
-                      type="checkbox"
-                      checked={row.included}
-                      onChange={() => toggleTable(row.key)}
-                      className="rounded border-slate-600 bg-slate-800 text-blue-600 focus:ring-blue-600 focus:ring-offset-slate-950"
-                    />
-                  </td>
-                  <td className="p-4 font-mono text-slate-300 text-xs">{row.owner}</td>
-                  <td className="p-4 font-medium">
-                    {row.tableName}
-                    {row.columns.length === 0 && (
-                      <span className="ml-2 px-2 py-0.5 bg-amber-500/10 text-amber-300 rounded text-[10px] font-bold tracking-wider">
-                        NO COLUMN INFO
-                      </span>
-                    )}
-                  </td>
-                  <td className="p-4 text-right text-slate-400 font-mono text-xs">{(row.estRows ?? 0).toLocaleString()}</td>
-                  <td className="p-4 text-right text-slate-400 font-mono text-xs">
-                    {((row.estBytes ?? 0) / 1024 / 1024).toFixed(2)}
-                  </td>
-                  <td className="p-4 text-center">
-                    {row.hasLobs && (
-                      <span className="px-2 py-0.5 bg-rose-500/10 text-rose-400 rounded text-[10px] font-bold tracking-wider">
-                        LOB
-                      </span>
-                    )}
-                  </td>
-                  <td className="p-4">
-                    <input
-                      type="text"
-                      placeholder="e.g. YEAR = 2024"
-                      disabled={!row.included}
-                      value={row.whereClause}
-                      onChange={(e) => setWhereClause(row.key, e.target.value)}
-                      className="w-full bg-slate-900 border border-slate-700 rounded py-1 px-2 text-xs focus:outline-none focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
-                    />
-                  </td>
-                  <td className="p-4 text-center">
-                    <button
-                      className="text-slate-500 hover:text-rose-400 text-xs"
-                      onClick={() => removeTable(row.key)}
-                      title="Remove from selection"
-                    >
-                      Remove
-                    </button>
-                  </td>
-                </tr>
-              ))}
-
-              {filteredTables.length === 0 && (
-                <tr>
-                  <td colSpan={8} className="p-8 text-center text-slate-500">
-                    No tables yet. Scan the source database to list everything in the schema, or add specific tables above.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-        <div className="bg-slate-900 border-t border-slate-800 p-3 flex justify-between items-center text-xs text-slate-400">
-          <div>
-            Selected: <span className="text-blue-400 font-bold">{includedCount}</span> tables
+          <div className="tb-seg" role="group" aria-label="Show tables">
+            <button type="button" aria-pressed={statusFilter === 'all'} onClick={() => setStatusFilter('all')}>
+              All <span className="tb-seg-count">{searchedTables.length}</span>
+            </button>
+            <button type="button" aria-pressed={statusFilter === 'selected'} onClick={() => setStatusFilter('selected')}>
+              Selected <span className="tb-seg-count">{searchedSelected}</span>
+            </button>
+            <button type="button" aria-pressed={statusFilter === 'unselected'} onClick={() => setStatusFilter('unselected')}>
+              Unselected <span className="tb-seg-count">{searchedTables.length - searchedSelected}</span>
+            </button>
           </div>
-          <div className="flex gap-4">
-            <div>
-              Total rows: <span className="text-slate-200">{totalRows.toLocaleString()}</span>
-            </div>
-            <div>
-              Total size: <span className="text-slate-200">{(totalBytes / 1024 / 1024).toFixed(2)} MB</span>
-            </div>
-          </div>
+
+          <span className="tb-muted tb-spacer">
+            Showing {visibleTables.length.toLocaleString()} of {tables.length.toLocaleString()}
+          </span>
         </div>
       </div>
+
+      <TableGrid
+        rows={visibleTables}
+        sort={sort}
+        onSort={handleSort}
+        resetKey={resetKey}
+        onToggle={toggleTable}
+        onToggleAll={handleToggleAll}
+        onWhere={setWhereClause}
+        onRemove={removeTable}
+        empty={emptyState}
+        stats={stats}
+      />
     </div>
   );
 }

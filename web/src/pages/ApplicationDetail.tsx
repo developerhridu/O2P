@@ -20,6 +20,7 @@ import {
   refreshDiscovery,
   updateApplication,
 } from '../api';
+import SchemaCombobox from '../components/SchemaCombobox';
 import { SLOTS, slotLabel } from '../labels';
 
 const TONE_BY_KIND: Record<number, string> = {
@@ -357,12 +358,12 @@ export default function ApplicationDetail() {
           <div className="card w-full max-w-lg">
             <h3 className="m-0 text-xl font-semibold">Find tables automatically</h3>
             <p className="mt-2 text-sm text-slate-400">
-              Scan the source database and build a table selection from the schema you name.
+              Scan the source database and build a table selection from one of its schemas.
             </p>
             <form onSubmit={handleGenerateManifest} className="mt-5 flex flex-col gap-4">
               <div>
-                <label className="label">Source database to scan</label>
-                <select className="input" value={genConnId} onChange={(event) => setGenConnId(Number(event.target.value))} required>
+                <label className="label" htmlFor="gen-source-db">Source database to scan</label>
+                <select id="gen-source-db" className="input" value={genConnId} onChange={(event) => setGenConnId(Number(event.target.value))} required>
                   <option value="">Select a source database</option>
                   {oracleConnections.map((connection) => (
                     <option key={connection.id} value={connection.id}>{connection.name}</option>
@@ -370,8 +371,14 @@ export default function ApplicationDetail() {
                 </select>
               </div>
               <div>
-                <label className="label">Source schema</label>
-                <input className="input" value={genOwner} onChange={(event) => setGenOwner(event.target.value.toUpperCase())} placeholder="HR" required />
+                <label className="label" htmlFor="gen-source-schema">Source schema</label>
+                <SchemaCombobox
+                  id="gen-source-schema"
+                  size="md"
+                  connectionId={genConnId}
+                  value={genOwner}
+                  onChange={setGenOwner}
+                />
               </div>
               <div className="flex justify-end gap-3 pt-2">
                 <button type="button" className="btn btn-secondary" onClick={() => setShowGenModal(false)}>Cancel</button>

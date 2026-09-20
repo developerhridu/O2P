@@ -47,6 +47,44 @@ namespace O2P.Api.Controllers
             return Ok(cached.Select(ToManifestReadyTable));
         }
 
+        /// <summary>
+        /// The schemas the source account can read tables from, for the UI's schema picker.
+        /// Opens a live Oracle session with the stored credentials, so it is restricted to the same
+        /// roles as <see cref="RefreshDiscovery"/>, which is the only thing that consumes the answer.
+        /// </summary>
+        [HttpGet("schemas")]
+        [Authorize(Roles = "Admin,Operator")]
+        public async Task<IActionResult> GetSchemas(long connectionId, CancellationToken cancellationToken)
+        {
+            var conn = await _db.Connections.FindAsync(new object[] { connectionId }, cancellationToken);
+            if (conn == null || conn.Kind != O2P.Domain.Enums.ConnectionKind.Oracle)
+                return BadRequest("That database does not exist.");
+
+            string password;
+            try
+            {
+                password = _secretProtector.Unprotect(conn.SecretCiphertext ?? System.Array.Empty<byte>());
+            }
+            catch (System.Exception ex)
+            {
+                return BadRequest($"Could not decrypt stored credentials for this connection: {ex.Message}. Re-enter the connection's password and try again.");
+            }
+
+            try
+            {
+                var result = await _discoveryService.ListSchemasAsync(conn, password, cancellationToken);
+                return Ok(new
+                {
+                    schemas = result.Schemas.Select(s => new { name = s.Name, tableCount = s.TableCount }),
+                    skipped = result.Skipped
+                });
+            }
+            catch (System.Exception ex)
+            {
+                return BadRequest($"Could not read the schemas: {ex.Message}");
+            }
+        }
+
         [HttpPost("refresh")]
         [Authorize(Roles = "Admin,Operator")]
         public async Task<IActionResult> RefreshDiscovery(long connectionId, [FromQuery] string owner, [FromBody] RefreshDiscoveryRequest? request, CancellationToken cancellationToken)

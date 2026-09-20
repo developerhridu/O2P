@@ -183,10 +183,23 @@ h6 {
 }
 
 .main-content {
+  --page-pad: 32px;
   flex: 1;
   min-width: 0;
-  padding: 32px;
+  padding: var(--page-pad);
   overflow-y: auto;
+}
+
+/* A page that should be exactly one viewport tall, so only its inner grid scrolls.
+   Derived from --page-pad rather than a guessed constant, so it stays right if the
+   page padding changes. min-height: 0 on the flex children below is what lets the
+   grid shrink and scroll instead of pushing the page taller. */
+.page-fill {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: calc(100vh - var(--page-pad) * 2);
+  height: calc(100dvh - var(--page-pad) * 2);
 }
 
 .card,
@@ -330,6 +343,13 @@ select option {
   }
 
   .main-content {
-    padding: 20px;
+    --page-pad: 20px;
+  }
+
+  /* The sidebar is a top band here, so "fill the viewport" no longer holds. */
+  .page-fill {
+    height: auto;
+    min-height: 75vh;
+    min-height: 75dvh;
   }
 }

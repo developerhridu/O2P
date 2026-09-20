@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -65,15 +66,7 @@ namespace O2P.Infrastructure.Oracle.Discovery
                 return mockTables;
             }
 
-            var csb = new OracleConnectionStringBuilder
-            {
-                DataSource = $"{connection.Host}:{connection.Port}/{connection.ServiceOrDb}",
-                UserID = connection.Username,
-                Password = password,
-                Pooling = true,
-                MinPoolSize = 1,
-                MaxPoolSize = 10
-            };
+            var csb = BuildConnectionString(connection, password);
 
             var results = new List<DiscoveryCache>();
 
@@ -227,6 +220,87 @@ namespace O2P.Infrastructure.Oracle.Discovery
 
             return results;
         }
+
+        // Oracle's built-in schemas, for databases old enough to lack ALL_USERS.ORACLE_MAINTAINED
+        // (added in 12.1). Only used as a fallback; the column is authoritative where it exists.
+        private static readonly string[] KnownSystemSchemas =
+        {
+            "SYS", "SYSTEM", "XDB", "CTXSYS", "MDSYS", "ORDSYS", "ORDDATA", "ORDPLUGINS", "SI_INFORMTN_SCHEMA",
+            "OLAPSYS", "WMSYS", "EXFSYS", "DBSNMP", "OUTLN", "APPQOSSYS", "DIP", "ANONYMOUS", "XS$NULL",
+            "LBACSYS", "DVSYS", "DVF", "AUDSYS", "GSMADMIN_INTERNAL", "ORACLE_OCM", "SYSMAN", "MDDATA",
+            "FLOWS_FILES", "APEX_PUBLIC_USER", "OJVMSYS", "REMOTE_SCHEDULER_AGENT", "SYSBACKUP", "SYSDG",
+            "SYSKM", "SYSRAC", "GGSYS", "DBSFWUSER"
+        };
+
+        // The server upper-cases every owner it is given, so only names that are already upper-case
+        // and are safe to quote (see SqlIdentifier.QuoteOracle) can actually be scanned.
+        private static readonly Regex ScannableSchemaName = new(@"^[A-Z_][A-Z0-9_$#]{0,127}$", RegexOptions.Compiled);
+
+        public async Task<SourceSchemaList> ListSchemasAsync(Connection connection, string password, CancellationToken cancellationToken)
+        {
+            if (connection.Host.Equals("mock", StringComparison.OrdinalIgnoreCase))
+            {
+                // APP matches the mock scan (two tables) so the whole flow is testable without Oracle.
+                return new SourceSchemaList(
+                    new[] { new SourceSchema("APP", 2), new SourceSchema("HR", 7), new SourceSchema("SALES", 12) },
+                    0);
+            }
+
+            var csb = BuildConnectionString(connection, password);
+            using var conn = new OracleConnection(csb.ConnectionString);
+            await conn.OpenAsync(cancellationToken);
+
+            // ORACLE_MAINTAINED needs 12.1+; on 11g the column does not exist (ORA-00904). Probe first,
+            // the same way discovery probes ALL_SEGMENTS/ALL_LOBS, rather than running a query that throws.
+            var hasOracleMaintained = await CanQueryAsync(conn, "SELECT oracle_maintained FROM all_users WHERE 1 = 0", cancellationToken);
+            var systemFilter = hasOracleMaintained
+                ? "AND t.owner IN (SELECT username FROM all_users WHERE oracle_maintained = 'N')"
+                : $"AND t.owner NOT IN ({string.Join(", ", KnownSystemSchemas.Select(s => $"'{s}'"))})";
+
+            // Same table filter as DiscoverTablesAsync (nested = 'NO', the IOT rule) so the count beside
+            // a schema is what a scan of it will find. ALL_* views only: an ordinary source account has
+            // no DBA_* access.
+            var sql = $@"
+SELECT t.owner, COUNT(*) AS table_count
+FROM all_tables t
+WHERE t.nested = 'NO'
+  AND (t.iot_type IS NULL OR t.iot_type = 'IOT')
+  {systemFilter}
+GROUP BY t.owner
+ORDER BY t.owner";
+
+            var schemas = new List<SourceSchema>();
+            var skipped = 0;
+
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = sql;
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var name = reader.GetString(0);
+                var count = Convert.ToInt32(reader.GetValue(1));
+
+                if (!ScannableSchemaName.IsMatch(name))
+                {
+                    skipped++;
+                    continue;
+                }
+
+                schemas.Add(new SourceSchema(name, count));
+            }
+
+            return new SourceSchemaList(schemas, skipped);
+        }
+
+        private static OracleConnectionStringBuilder BuildConnectionString(Connection connection, string password) => new()
+        {
+            DataSource = $"{connection.Host}:{connection.Port}/{connection.ServiceOrDb}",
+            UserID = connection.Username,
+            Password = password,
+            Pooling = true,
+            MinPoolSize = 1,
+            MaxPoolSize = 10
+        };
 
         private static async Task<bool> CanQueryAsync(OracleConnection conn, string sql, CancellationToken cancellationToken)
         {

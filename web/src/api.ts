@@ -233,17 +233,29 @@ export async function updateApplication(id: number, app: any) {
 
 // Discovery
 export async function fetchDiscoveredTables(connectionId: number, owner: string) {
-  const res = await apiFetch(`${API_BASE}/connections/${connectionId}/discovery?owner=${owner}`, {
+  const res = await apiFetch(`${API_BASE}/connections/${connectionId}/discovery?owner=${encodeURIComponent(owner)}`, {
     headers: getHeaders()
   });
   if (!res.ok) throw new Error(await readErrorMessage(res, 'Could not load the scanned tables.'));
   return res.json();
 }
 
+export type SourceSchema = { name: string; tableCount: number };
+export type SourceSchemaList = { schemas: SourceSchema[]; skipped: number };
+
+// The schemas the source account can read tables from, for the schema picker.
+export async function fetchSchemas(connectionId: number): Promise<SourceSchemaList> {
+  const res = await apiFetch(`${API_BASE}/connections/${connectionId}/discovery/schemas`, {
+    headers: getHeaders()
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, 'Could not load the schemas.'));
+  return res.json();
+}
+
 // tableNames omitted/empty -> full schema scan (replaces the owner's whole cache).
 // tableNames provided -> targeted lookup for just those tables (does not disturb the rest of the cache).
 export async function refreshDiscovery(connectionId: number, owner: string, tableNames?: string[]) {
-  const res = await apiFetch(`${API_BASE}/connections/${connectionId}/discovery/refresh?owner=${owner}`, {
+  const res = await apiFetch(`${API_BASE}/connections/${connectionId}/discovery/refresh?owner=${encodeURIComponent(owner)}`, {
     method: 'POST',
     headers: getHeaders(),
     body: JSON.stringify({ tableNames: tableNames && tableNames.length > 0 ? tableNames : null })
@@ -285,7 +297,7 @@ export async function updateManifestTables(manifestId: number, tables: any[]) {
 }
 
 export async function generateManifest(appId: number, connectionId: number, owner: string) {
-  const res = await apiFetch(`${API_BASE}/applications/${appId}/manifests/generate?connectionId=${connectionId}&owner=${owner}`, {
+  const res = await apiFetch(`${API_BASE}/applications/${appId}/manifests/generate?connectionId=${connectionId}&owner=${encodeURIComponent(owner)}`, {
     method: 'POST',
     headers: getHeaders()
   });

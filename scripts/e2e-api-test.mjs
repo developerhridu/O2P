@@ -80,8 +80,10 @@ async function main() {
 
   // operator/viewer permission boundary: log in as the temp (viewer) user and confirm no user admin
   const rv = await api('POST', '/api/v1/auth/login', { username: uname, password: 'QaReset2026!B' }, { auth: false });
+  let viewerAccessToken = null; // reused below to check the schema list is not open to Viewers
   if (rv.status === 200) {
     const viewerToken = rv.data.token;
+    viewerAccessToken = viewerToken;
     const probe = await fetch(`${API}/api/v1/users`, { headers: { Authorization: `Bearer ${viewerToken}` } });
     assert(probe.status === 403, 'viewer forbidden from /users', `status=${probe.status}`);
     const probe2 = await fetch(`${API}/api/v1/connections`, { method: 'POST', headers: { Authorization: `Bearer ${viewerToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'x', kind: 'postgres', host: 'mock', port: 1, serviceOrDb: 'x', username: 'x', password: 'x' }) });
@@ -154,6 +156,22 @@ async function main() {
   // targeted discovery
   r = await api('POST', `/api/v1/connections/${oraId}/discovery/refresh?owner=APP`, { tableNames: ['ORDERS'] });
   assert(r.status === 200 && r.data.tables?.length === 1, 'targeted discovery finds 1 table', `status=${r.status}`);
+
+  // schema list (feeds the Source schema dropdown). A mock connection returns a fixed set.
+  r = await api('GET', `/api/v1/connections/${oraId}/discovery/schemas`);
+  const schemaNames = (r.data?.schemas || []).map(s => s.name).join(',');
+  assert(r.status === 200 && schemaNames === 'APP,HR,SALES', 'schema list returns APP, HR, SALES', `status=${r.status} body=${JSON.stringify(r.data).slice(0,200)}`);
+  const schemaCounts = (r.data?.schemas || []).map(s => s.tableCount).join(',');
+  assert(schemaCounts === '2,7,12' && r.data?.skipped === 0, 'schema list carries table counts and skipped=0', `counts=${schemaCounts} skipped=${r.data?.skipped}`);
+
+  r = await api('GET', `/api/v1/connections/${pgId}/discovery/schemas`);
+  assert(r.status === 400, 'schema list is refused for a PostgreSQL connection', `status=${r.status}`);
+  r = await api('GET', `/api/v1/connections/${oraId}/discovery/schemas`, undefined, { auth: false });
+  assert(r.status === 401, 'schema list requires sign-in', `status=${r.status}`);
+  if (viewerAccessToken) {
+    const vs = await fetch(`${API}/api/v1/connections/${oraId}/discovery/schemas`, { headers: { Authorization: `Bearer ${viewerAccessToken}` } });
+    assert(vs.status === 403, 'viewer forbidden from the schema list (it opens a live Oracle session)', `status=${vs.status}`);
+  }
 
   // ---- MANIFEST ----
   log('\n[Manifest]');
