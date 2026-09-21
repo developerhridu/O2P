@@ -295,7 +295,19 @@ An **migration** is your container for one migration project: its database roles
 
 If nothing happens, you probably lack Operator/Admin rights or the name already exists (the UI shows no error in either case).
 
-The migration appears as a card. Click **Manage** to open it. (The trash icon, *Delete Migration*, is Admin-only and also deletes all its table selections and job history.)
+The migration appears as a card. Click **Manage** to open it.
+
+### 7.1a Rename or delete a migration or a table selection
+
+| What | Where | Who | Notes |
+|---|---|---|---|
+| Rename a migration (and change its description) | **Rename** at the top of the migration page | Admin, Operator | Its databases, table selections and runs stay as they are. A name another migration already has — in any upper/lower case — is refused |
+| Delete a migration | **Delete migration** at the top of the migration page, or the trash icon on its card in the list | Admin | Also deletes its table selections and run history. The databases, and tables already copied into the destination, are not touched |
+| Rename a table selection | The pencil beside its name, or the name box at the top of the builder (saved with **Save selection**) | Admin, Operator | Its tables and runs stay as they are. Names must be different within one migration |
+| Delete a table selection | The red bin at the end of its row | Admin, Operator | Also deletes the history of every run made from it. Tables already copied into the destination, and their change tracking, are not touched |
+
+Every delete asks first. A delete is refused while a run it would remove is still waiting, running or paused;
+the message names the run — cancel it, then delete.
 
 ### 7.2 Bind database roles
 

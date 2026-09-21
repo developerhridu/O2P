@@ -44,13 +44,23 @@ export function getAuthState(): AuthState | null {
 }
 
 async function readErrorMessage(res: Response, fallback: string): Promise<string> {
+  let text = '';
   try {
-    const data = await res.json();
+    text = await res.text();
+  } catch {
+    return fallback;
+  }
+  try {
+    const data = JSON.parse(text);
     if (typeof data === 'string' && data.trim()) return data;
     if (data && typeof data.message === 'string' && data.message.trim()) return data.message;
     if (data && typeof data.title === 'string' && data.title.trim()) return data.title;
   } catch {
-    // response body wasn't JSON (or was empty) - fall through to the generic message
+    // Not JSON. The API sends its plain-sentence refusals (Conflict("..."), BadRequest("...")) as
+    // text/plain, and those sentences are exactly what the user needs to read - so use the text,
+    // unless it looks like an HTML error page rather than a message.
+    const plain = text.trim();
+    if (plain && plain.length <= 1000 && !plain.startsWith('<')) return plain;
   }
   return fallback;
 }

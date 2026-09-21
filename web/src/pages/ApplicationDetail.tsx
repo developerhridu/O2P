@@ -6,16 +6,23 @@ import {
   FileText,
   History,
   ListChecks,
+  Pencil,
   Play,
   RefreshCw,
   ShieldAlert,
+  Trash2,
   Unlink,
   Wand2,
 } from 'lucide-react';
 import {
   copyChanges,
   createJob,
+  deleteApplication,
+  deleteManifest,
   fetchApplication,
+  hasRole,
+  renameApplication,
+  renameManifest,
   fetchConnections,
   fetchManifests,
   generateManifest,
@@ -33,6 +40,10 @@ const TONE_BY_KIND: Record<number, string> = {
 };
 
 const slots = SLOTS.map((s) => ({ ...s, tone: TONE_BY_KIND[s.kind] }));
+
+// Inline, not a Tailwind colour class: the unlayered global .btn rule wins over utilities. Same red as
+// the Delete buttons on the Runs pages.
+const DANGER = { color: '#f87171', borderColor: 'rgba(248,113,113,0.4)' };
 
 export default function ApplicationDetail() {
   const { id } = useParams();
@@ -65,6 +76,20 @@ export default function ApplicationDetail() {
   const [confirmPhrase, setConfirmPhrase] = useState('');
   const [launchLoading, setLaunchLoading] = useState(false);
   const [launchError, setLaunchError] = useState<string | null>(null);
+
+  // Renaming and deleting. Admins and Operators may rename anything and delete a table selection; only
+  // an Admin may delete the whole migration - the same rules the server enforces.
+  const canEdit = hasRole('Admin') || hasRole('Operator');
+  const canDeleteMigration = hasRole('Admin');
+  const [editingApp, setEditingApp] = useState(false);
+  const [appName, setAppName] = useState('');
+  const [appDescription, setAppDescription] = useState('');
+  const [savingApp, setSavingApp] = useState(false);
+  const [appEditError, setAppEditError] = useState<string | null>(null);
+  const [renamingManifestId, setRenamingManifestId] = useState<number | null>(null);
+  const [manifestName, setManifestName] = useState('');
+  const [manifestEditError, setManifestEditError] = useState<string | null>(null);
+  const [busyManifestId, setBusyManifestId] = useState<number | null>(null);
 
   const slotBindings = app?.connections || [];
   const oracleConnections = useMemo(() => connections.filter((c) => c.kind === 0), [connections]);
@@ -143,6 +168,79 @@ export default function ApplicationDetail() {
       await saveApplicationConnections(slotBindings.filter((binding: any) => binding.slot !== slot));
     } catch (err: any) {
       alert(err.message || 'Could not remove the database.');
+    }
+  };
+
+  const startEditingApp = () => {
+    setAppName(app.name);
+    setAppDescription(app.description ?? '');
+    setAppEditError(null);
+    setEditingApp(true);
+  };
+
+  const handleSaveApp = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setSavingApp(true);
+    setAppEditError(null);
+    try {
+      const saved = await renameApplication(appId, { name: appName, description: appDescription });
+      setApp((current: any) => ({ ...current, name: saved.name, description: saved.description }));
+      setEditingApp(false);
+    } catch (err: any) {
+      setAppEditError(err.message);
+    } finally {
+      setSavingApp(false);
+    }
+  };
+
+  const handleDeleteApp = async () => {
+    if (!confirm(
+      `Delete the migration "${app.name}"?\n\nThis also deletes its ${manifests.length} table selection(s), its database choices and ` +
+      'its run history, for good. Tables already copied into the destination are not touched.'
+    )) return;
+    try {
+      await deleteApplication(appId);
+      navigate('/applications');
+    } catch (err: any) {
+      alert(err.message);
+    }
+  };
+
+  const startRenamingManifest = (manifest: any) => {
+    setRenamingManifestId(manifest.id);
+    setManifestName(manifest.name || '');
+    setManifestEditError(null);
+  };
+
+  const handleRenameManifest = async (event: React.FormEvent, manifestId: number) => {
+    event.preventDefault();
+    setBusyManifestId(manifestId);
+    setManifestEditError(null);
+    try {
+      const saved = await renameManifest(manifestId, manifestName);
+      setManifests((list) => list.map((m) => (m.id === manifestId ? { ...m, name: saved.name } : m)));
+      setRenamingManifestId(null);
+    } catch (err: any) {
+      setManifestEditError(err.message);
+    } finally {
+      setBusyManifestId(null);
+    }
+  };
+
+  const handleDeleteManifest = async (manifest: any) => {
+    const label = manifest.name || `Table selection v${manifest.version}`;
+    if (!confirm(
+      `Delete the table selection "${label}"?\n\nThis also deletes the history of every run made from it, for good. ` +
+      'Tables already copied into the destination are not touched.'
+    )) return;
+    setBusyManifestId(manifest.id);
+    try {
+      await deleteManifest(manifest.id);
+      setManifests((list) => list.filter((m) => m.id !== manifest.id));
+    } catch (err: any) {
+      alert(err.message);
+    } finally {
+      setBusyManifestId(null);
     }
   };
 
@@ -234,10 +332,48 @@ export default function ApplicationDetail() {
         <Link to="/applications" className="btn btn-secondary min-h-10 px-3" title="Back to migrations">
           <ArrowLeft size={18} />
         </Link>
-        <div className="min-w-0">
-          <h1 className="text-gradient m-0 text-3xl font-bold leading-tight md:text-4xl">{app.name}</h1>
-          <p className="mt-2 max-w-4xl text-base text-slate-400">{app.description || 'No description provided.'}</p>
-        </div>
+        {editingApp ? (
+          <form onSubmit={handleSaveApp} className="flex min-w-0 flex-1 flex-col gap-3" aria-label="Rename migration">
+            <div>
+              <label className="label" htmlFor="app-name">Migration name</label>
+              <input id="app-name" className="input" value={appName} maxLength={200} autoFocus required
+                onChange={(event) => setAppName(event.target.value)} />
+            </div>
+            <div>
+              <label className="label" htmlFor="app-description">Description</label>
+              <textarea id="app-description" className="input" rows={2} value={appDescription}
+                onChange={(event) => setAppDescription(event.target.value)} />
+            </div>
+            {appEditError && <p className="m-0 text-sm text-rose-300" role="alert">{appEditError}</p>}
+            <div className="flex gap-2">
+              <button type="submit" className="btn" disabled={savingApp || !appName.trim()}>
+                {savingApp ? 'Saving…' : 'Save'}
+              </button>
+              <button type="button" className="btn btn-secondary" onClick={() => setEditingApp(false)}>Cancel</button>
+            </div>
+          </form>
+        ) : (
+          <>
+            <div className="min-w-0 flex-1">
+              <h1 className="text-gradient m-0 text-3xl font-bold leading-tight md:text-4xl">{app.name}</h1>
+              <p className="mt-2 max-w-4xl text-base text-slate-400">{app.description || 'No description provided.'}</p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {canEdit && (
+                <button className="btn btn-secondary" onClick={startEditingApp}>
+                  <Pencil size={16} />
+                  Rename
+                </button>
+              )}
+              {canDeleteMigration && (
+                <button className="btn btn-secondary" onClick={handleDeleteApp} style={DANGER}>
+                  <Trash2 size={16} />
+                  Delete migration
+                </button>
+              )}
+            </div>
+          </>
+        )}
       </div>
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_420px]">
@@ -267,12 +403,39 @@ export default function ApplicationDetail() {
             {manifests.map((manifest) => (
               <div key={manifest.id} className="rounded-lg border border-slate-800 bg-slate-950/50 p-4">
                 <div className="flex flex-wrap items-center justify-between gap-4">
-                  <div>
-                    <h3 className="m-0 text-lg font-semibold">{manifest.name || `Table selection v${manifest.version}`}</h3>
-                    <p className="m-0 mt-1 text-sm text-slate-400">
-                      Created {new Date(manifest.createdAt).toLocaleString()}
-                    </p>
-                  </div>
+                  {renamingManifestId === manifest.id ? (
+                    <form onSubmit={(event) => handleRenameManifest(event, manifest.id)} className="flex min-w-0 flex-1 flex-col gap-2"
+                      aria-label="Rename table selection">
+                      <div className="flex flex-wrap gap-2">
+                        <input className="input min-w-0 flex-1" value={manifestName} maxLength={200} autoFocus required
+                          aria-label="Table selection name" onChange={(event) => setManifestName(event.target.value)} />
+                        <button type="submit" className="btn" disabled={busyManifestId === manifest.id || !manifestName.trim()}>
+                          {busyManifestId === manifest.id ? 'Saving…' : 'Save'}
+                        </button>
+                        <button type="button" className="btn btn-secondary" onClick={() => setRenamingManifestId(null)}>Cancel</button>
+                      </div>
+                      {manifestEditError && <p className="m-0 text-sm text-rose-300" role="alert">{manifestEditError}</p>}
+                    </form>
+                  ) : (
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <h3 className="m-0 text-lg font-semibold">{manifest.name || `Table selection v${manifest.version}`}</h3>
+                        {canEdit && (
+                          <button
+                            className="rounded p-1 text-slate-400 hover:bg-slate-900 hover:text-slate-100"
+                            onClick={() => startRenamingManifest(manifest)}
+                            title="Rename"
+                            aria-label={`Rename ${manifest.name || 'table selection'}`}
+                          >
+                            <Pencil size={15} />
+                          </button>
+                        )}
+                      </div>
+                      <p className="m-0 mt-1 text-sm text-slate-400">
+                        Created {new Date(manifest.createdAt).toLocaleString()}
+                      </p>
+                    </div>
+                  )}
                   <div className="flex flex-wrap gap-2">
                     <Link to={`/applications/${appId}/manifests/${manifest.id}/builder`} className="btn btn-secondary">
                       Edit
@@ -297,6 +460,18 @@ export default function ApplicationDetail() {
                       <Play size={16} />
                       Start Run
                     </button>
+                    {canEdit && (
+                      <button
+                        className="btn btn-secondary px-3"
+                        style={DANGER}
+                        onClick={() => handleDeleteManifest(manifest)}
+                        disabled={busyManifestId === manifest.id}
+                        title="Delete this table selection"
+                        aria-label={`Delete ${manifest.name || 'table selection'}`}
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
