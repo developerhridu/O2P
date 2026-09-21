@@ -595,6 +595,38 @@ Click **View Details**, or you land here after launching. The page refreshes eve
 
 There is no ETA. Use **Rows** from the table selection and the *Active Rate* card to estimate. Throughput is capped at roughly 50,000 rows/second across the whole Worker, and tables are prepared one after another. LOB-heavy tables are much slower. You can close the browser; the job continues in the Worker.
 
+### 10.5 Copy changes: keep a copied table up to date
+
+After a bulk copy, the Oracle source keeps changing. **Copy changes** copies just what changed since the last
+copy — new rows added, changed rows updated, deleted rows deleted — without emptying or recreating anything.
+Full details, including what your DBA must switch on: User Guide, *Keep the destination up to date*.
+
+On the migration page, each table selection has two buttons beside **Start Run**:
+
+| Button | What it does |
+|---|---|
+| **Check change tracking** | Looks at the source for everything Copy changes needs, for the ticked tables. Read-only. Shows the database layout, a tick or cross per item, a line per table, and **For your DBA** — the SQL for whatever is missing, with **Copy SQL** |
+| **Copy changes** | Opens the same dialog as Start Run (copy from, copy to, destination schema, and the typed phrase for a live destination) and starts a change copy. Tables not tracked in that destination are left out, and the run says which and why |
+
+Run **Check change tracking** before the bulk copy: tracking starts only for a bulk copy that began while the
+source was ready.
+
+The **Change tracking** panel below lists each tracked table:
+
+| Status | Meaning |
+|---|---|
+| **Ready for first change copy** | Set up by a bulk copy that created the table. The first Copy changes also removes any row the bulk copy picked up twice, then adds the table's primary key |
+| **Tracking** | Up to date as of *Last copied*; the next Copy changes continues from there |
+| **Needs a bulk copy** | The change history cannot describe what happened (a truncate, a structural change, deleted archived logs, …). The note says which. Run a bulk copy to track it again |
+
+*Held back by N open Oracle transactions* means those transactions had not committed when the last copy ran;
+their rows are looked at again by the next copy. Hover it for details.
+
+A change copy on the Runs page is tagged **Change copy**. Its page shows *rows added or updated* and *rows
+deleted* per table instead of batches and speed, and has no row-count check (the destination also holds rows the
+copy did not touch). It can be cancelled but not retried or paused: press **Copy changes** again instead — it
+continues from the last successful copy, and repeating work is harmless.
+
 ---
 
 ## 11. Step 7 — Verify the result
@@ -722,7 +754,7 @@ Goal: copy Oracle schema `HR` to PostgreSQL schema `hr_target` in database `TARG
 | Job | `Chunk timed out after N minutes…` | Slow read/network or heavy LOBs → administrator lowers concurrency or raises timeout; re-run |
 | Job | ORA-50000 / connection timeouts to Oracle | Too many concurrent Oracle sessions → administrator lowers concurrency |
 | Job | **CompletedWithErrors**, counts differ | Source changed during the run, target trigger, or a filter → freeze source, re-run |
-| PostgreSQL | `relation "employees" does not exist` | Names are upper-case and quoted → use `"EMPLOYEES"` |
+| PostgreSQL | `relation "EMPLOYEES" does not exist` | Tables O2P creates are lower case → use `employees`. A table copied by an older version keeps its upper-case name and must be quoted: `"EMPLOYEES"` |
 
 Still stuck? Collect: the job number, the failing table and its red error text, and the time. Your administrator can find the details in the API and Worker logs (`logs/`), or with the `tools/job-inspect` command-line tool.
 
@@ -734,16 +766,16 @@ O2P copies **table structures and rows**. Plan a DBA task for the rest.
 
 | Not migrated | What to do |
 |---|---|
-| Primary keys, unique keys, foreign keys, check constraints on **newly created** tables | Create them in PostgreSQL after the load (constraints already on a pre-existing target table are restored) |
+| Primary keys, unique keys, foreign keys, check constraints on **newly created** tables | Create them in PostgreSQL after the load (constraints already on a pre-existing target table are restored). A tracked table gets its primary key from its first **Copy changes** |
 | Indexes | Create after the load (faster than loading into indexed tables) |
 | Sequences, identity columns, column defaults | Recreate; set sequence values above the current max IDs |
 | Views, materialized views | Recreate/convert |
 | Procedures, functions, packages, triggers | Rewrite in PL/pgSQL |
 | Synonyms, grants, users, roles | Recreate |
-| Ongoing changes (CDC / replication) | Not supported — freeze the source, or plan a cut-over window |
+| Continuous replication | Changes are copied only when you press **Copy changes** ([§10.5](#105-copy-changes-keep-a-copied-table-up-to-date)) — press it again before cut-over, after writes stop |
 | Reject rows | A bad row fails its whole batch; there is no reject table |
 
-Also remember: table and column names keep their upper-case spelling and are created in quotes, so migration SQL against the new database must quote identifiers, or you must rename objects to lower case afterwards (`ALTER TABLE "HR"."EMPLOYEES" RENAME TO employees;`).
+Also remember: tables and columns O2P creates are lower case, so SQL against them needs no quotes. Tables copied by an older version of O2P keep their upper-case names; quote those, or rename them yourself (`ALTER TABLE hr."EMPLOYEES" RENAME TO employees;`) — O2P then finds and reuses the lower-case one.
 
 **Post-migration checklist for the DBA**
 

@@ -2,9 +2,10 @@ import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { Activity, RefreshCw, Power, Ban, RotateCcw, Trash2 } from 'lucide-react';
 import { fetchJobs, cancelAllAndRestartWorker, commandJob, deleteJob, hasRole } from '../api';
-import { commandLabel, statusColor, statusLabel } from '../labels';
+import { commandLabel, runKindLabel, statusColor, statusLabel } from '../labels';
 import { useWorkerStatus } from '../useWorkerStatus';
 import { WorkerBanner, WorkerChip } from '../components/WorkerStatus';
+import '../components/ChangeTracking.css';
 
 export default function JobRuns() {
   const [jobs, setJobs] = useState<any[]>([]);
@@ -118,7 +119,9 @@ export default function JobRuns() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
           {jobs.map(job => {
             const canCancel = ['Running', 'Queued', 'Paused'].includes(job.status);
-            const canRetry = ['Failed', 'Cancelled', 'CompletedWithErrors'].includes(job.status);
+            // A change copy is never retried the bulk way (that would empty its tables); the next
+            // Copy changes simply picks up where the last good one left off.
+            const canRetry = job.kind !== 'changes' && ['Failed', 'Cancelled', 'CompletedWithErrors'].includes(job.status);
             const busy = busyJobId === job.id;
 
             return (
@@ -150,7 +153,10 @@ export default function JobRuns() {
                     <Activity size={20} />
                   </div>
                   <div>
-                    <h4 style={{ margin: 0 }}>Run #{job.id}</h4>
+                    <h4 style={{ margin: 0 }}>
+                      Run #{job.id}{' '}
+                      <span className="run-kind" data-kind={job.kind}>{runKindLabel(job.kind)}</span>
+                    </h4>
                     <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
                       Migration: {job.application?.name} • Destination schema: {job.targetSchema}
                     </span>

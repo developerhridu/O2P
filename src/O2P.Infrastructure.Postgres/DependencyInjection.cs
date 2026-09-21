@@ -14,6 +14,7 @@ namespace O2P.Infrastructure.Postgres
             services.AddScoped<IPostgresConstraintManager, PostgresConstraintManager>();
             services.AddScoped<IPostgresSchemaInspector, PostgresSchemaInspector>();
             services.AddScoped<IPostgresBinaryWriter, PostgresBinaryWriter>();
+            services.AddScoped<IPostgresChangeApplier, PostgresChangeApplier>();
             services.AddScoped<ITargetCountExecutor, PostgresCountExecutor>();
             services.AddScoped<ITargetPreflightExecutor, PostgresPreflightExecutor>();
             return services;

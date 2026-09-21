@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { Plus, Trash2, X } from 'lucide-react';
-import { API_BASE, apiFetch, getHeaders } from '../api';
+import { API_BASE, apiFetch, deleteApplication, getHeaders, hasRole } from '../api';
 
 export default function Applications() {
   const [apps, setApps] = useState<any[]>([]);
@@ -49,23 +49,19 @@ export default function Applications() {
   };
 
   const handleDelete = async (id: number, appName: string) => {
-    if (!confirm(`Delete the migration "${appName}"? This also deletes its table selections, settings and run history.`)) {
+    if (!confirm(
+      `Delete the migration "${appName}"?\n\nThis also deletes its table selections, database choices and run history, for good. ` +
+      'Tables already copied into the destination are not touched.'
+    )) {
       return;
     }
 
     try {
-      const response = await apiFetch(`${API_BASE}/applications/${id}`, {
-        method: 'DELETE',
-        headers: getHeaders(),
-      });
-
-      if (response.ok) {
-        fetchApps();
-      } else {
-        console.error('Could not delete the migration');
-      }
-    } catch (error) {
-      console.error('Error deleting the migration:', error);
+      await deleteApplication(id);
+      fetchApps();
+    } catch (error: any) {
+      // Say why - usually a run still in progress - rather than failing silently.
+      alert(error.message || 'Could not delete the migration.');
     }
   };
 
@@ -88,15 +84,19 @@ export default function Applications() {
             <div className="p-6">
               <div className="flex justify-between items-start mb-4">
                 <h3 className="text-xl font-semibold">{app.name}</h3>
-                <div className="flex items-center space-x-2">
-                  <button 
-                    onClick={() => handleDelete(app.id, app.name)}
-                    className="text-slate-500 hover:text-rose-400 p-1 rounded hover:bg-slate-900 transition-colors cursor-pointer"
-                    title="Delete migration"
-                  >
-                    <Trash2 size={18} />
-                  </button>
-                </div>
+                {/* Only an Admin may delete a migration; the server refuses anyone else. */}
+                {hasRole('Admin') && (
+                  <div className="flex items-center space-x-2">
+                    <button
+                      onClick={() => handleDelete(app.id, app.name)}
+                      className="text-slate-500 hover:text-rose-400 p-1 rounded hover:bg-slate-900 transition-colors cursor-pointer"
+                      title="Delete migration"
+                      aria-label={`Delete migration ${app.name}`}
+                    >
+                      <Trash2 size={18} />
+                    </button>
+                  </div>
+                )}
               </div>
               <p className="text-slate-400 text-sm mb-6 line-clamp-2 h-10">
                 {app.description || "No description provided."}

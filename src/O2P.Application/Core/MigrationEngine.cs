@@ -20,19 +20,22 @@ namespace O2P.Application.Core
         private readonly IPostgresDdlExecutor _ddlExecutor;
         private readonly IPostgresConstraintManager _constraintManager;
         private readonly IPostgresSchemaInspector _schemaInspector;
+        private readonly IOracleChangeSource _changeSource;
 
         public MigrationEngine(
             IAppDbContext db,
             IOracleChunkPlanner chunkPlanner,
             IPostgresDdlExecutor ddlExecutor,
             IPostgresConstraintManager constraintManager,
-            IPostgresSchemaInspector schemaInspector)
+            IPostgresSchemaInspector schemaInspector,
+            IOracleChangeSource changeSource)
         {
             _db = db;
             _chunkPlanner = chunkPlanner;
             _ddlExecutor = ddlExecutor;
             _constraintManager = constraintManager;
             _schemaInspector = schemaInspector;
+            _changeSource = changeSource;
         }
 
         /// <summary>
@@ -145,6 +148,14 @@ namespace O2P.Application.Core
 
             if (tableRun == null) throw new Exception("This table is no longer part of the run.");
 
+            // Everything below may create or empty the destination table. A change run's table is a live,
+            // tracked table and must never come this way - whatever route led here (a retry, a restart).
+            if (JobRunKind.IsChanges(tableRun.JobRun.Kind))
+            {
+                throw new InvalidOperationException(
+                    "A change copy never prepares its tables like a bulk copy, because that would empty them. Start a new change copy instead.");
+            }
+
             var sourceBinding = tableRun.JobRun.Application.Connections.FirstOrDefault(c => c.Slot == tableRun.JobRun.SourceSlot);
             var targetBinding = tableRun.JobRun.Application.Connections.FirstOrDefault(c => c.Slot == tableRun.JobRun.TargetSlot);
 
@@ -215,6 +226,11 @@ namespace O2P.Application.Core
                 tableRun.TargetTableName = targetTableName;
                 tableRun.TargetNameStyle = style;
 
+                // This copy is about to replace the destination table's contents, so whatever change
+                // tracking knew about it no longer holds. Mark it before anything is emptied, never
+                // after, so a failure part-way cannot leave a tracker claiming to be in step.
+                await StopTrackingForBulkCopyAsync(tableRun, targetConn!.Id, targetSchema, targetTableName, cancellationToken);
+
                 if (!tableExisted)
                 {
                     // Absent: create the equivalent schema and load into it. A table created a moment
@@ -270,6 +286,17 @@ namespace O2P.Application.Core
                 tableRun.Status = "Planning";
                 await _db.SaveChangesAsync(cancellationToken);
 
+                // Where change tracking would continue from. Must be read before the first batch reads
+                // a row, which is only after planning. Best effort: without the privileges this copy
+                // simply cannot be tracked, and the copy itself is unaffected.
+                var startPoint = await _changeSource.CaptureStartPointAsync(
+                    sourceConn!, oraclePassword, tableRun.ManifestTable.Owner, tableRun.ManifestTable.TableName, cancellationToken);
+                tableRun.SourceStartScn = startPoint.StartScn;
+                tableRun.LoggingReadyAtStart = startPoint.LoggingReady;
+                tableRun.SourceObjectIdsJson = startPoint.ObjectIdsJson;
+                tableRun.SourceKeyJson = startPoint.Key == null ? null : System.Text.Json.JsonSerializer.Serialize(startPoint.Key, ChangeTracking.TrackedTableSetup.Json);
+                await _db.SaveChangesAsync(cancellationToken);
+
                 var chunks = await _chunkPlanner.PlanChunksAsync(
                     sourceConn!,
                     oraclePassword,
@@ -311,6 +338,34 @@ namespace O2P.Application.Core
                 }
 
                 throw;
+            }
+        }
+
+        /// <summary>
+        /// A bulk copy is about to replace this destination table's contents. Marks its tracker as needing
+        /// a fresh start (the bulk copy sets it up again when it finishes), and refuses to go on while a
+        /// change copy is using it - two runs writing one table at once would leave it matching neither.
+        /// </summary>
+        private async Task StopTrackingForBulkCopyAsync(TableRun tableRun, long targetConnectionId, string targetSchema, string targetTableName, CancellationToken cancellationToken)
+        {
+            // Conditional on the claim being free, so a change copy that claims it a moment earlier wins
+            // cleanly instead of both carrying on.
+            var marked = await _db.TrackedTables
+                .Where(t => t.TargetConnectionId == targetConnectionId
+                         && t.TargetSchema == targetSchema
+                         && t.TargetTableName == targetTableName
+                         && t.ActiveJobRunId == null)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(t => t.Status, TrackedTableStatus.NeedsBulkCopy)
+                    .SetProperty(t => t.LastError, $"Bulk copy run #{tableRun.JobRunId} is replacing this table's contents. Tracking starts again when it finishes.")
+                    .SetProperty(t => t.UpdatedAt, DateTimeOffset.UtcNow), cancellationToken);
+
+            if (marked == 0 && await _db.TrackedTables.AnyAsync(t =>
+                    t.TargetConnectionId == targetConnectionId && t.TargetSchema == targetSchema && t.TargetTableName == targetTableName,
+                    cancellationToken))
+            {
+                throw new InvalidOperationException(
+                    $"A change copy is running for {targetSchema}.{targetTableName}. Wait for it to finish, then retry this table.");
             }
         }
 

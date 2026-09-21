@@ -4,6 +4,8 @@ import {
   ArrowLeft,
   Database,
   FileText,
+  History,
+  ListChecks,
   Play,
   RefreshCw,
   ShieldAlert,
@@ -11,6 +13,7 @@ import {
   Wand2,
 } from 'lucide-react';
 import {
+  copyChanges,
   createJob,
   fetchApplication,
   fetchConnections,
@@ -21,6 +24,7 @@ import {
   updateApplication,
 } from '../api';
 import SchemaCombobox from '../components/SchemaCombobox';
+import { ReadinessDialog, TrackedTablesPanel } from '../components/ChangeTracking';
 import { SLOTS, slotLabel } from '../labels';
 
 const TONE_BY_KIND: Record<number, string> = {
@@ -51,6 +55,10 @@ export default function ApplicationDetail() {
   const [genLoading, setGenLoading] = useState(false);
 
   const [runningManifest, setRunningManifest] = useState<any>(null);
+  // The start dialog serves both kinds of run: a bulk copy, or copying only what changed.
+  const [runKind, setRunKind] = useState<'bulk' | 'changes'>('bulk');
+  const [readinessManifest, setReadinessManifest] = useState<any>(null);
+  const [trackedRefresh, setTrackedRefresh] = useState(0);
   const [sourceSlot, setSourceSlot] = useState('oracle_test');
   const [targetSlot, setTargetSlot] = useState('pg_test');
   const [targetSchema, setTargetSchema] = useState('public');
@@ -172,6 +180,19 @@ export default function ApplicationDetail() {
     setLaunchLoading(true);
     setLaunchError(null);
     try {
+      if (runKind === 'changes') {
+        const started = await copyChanges(appId, runningManifest.id, {
+          sourceSlot,
+          targetSlot,
+          targetSchema,
+          confirmationPhrase: isLiveTarget ? confirmPhrase : undefined,
+        });
+        setRunningManifest(null);
+        setTrackedRefresh((n) => n + 1);
+        navigate(`/jobs/${started.id}`);
+        return;
+      }
+
       const job = await createJob({
         applicationId: appId,
         manifestId: runningManifest.id,
@@ -252,11 +273,27 @@ export default function ApplicationDetail() {
                       Created {new Date(manifest.createdAt).toLocaleString()}
                     </p>
                   </div>
-                  <div className="flex gap-2">
+                  <div className="flex flex-wrap gap-2">
                     <Link to={`/applications/${appId}/manifests/${manifest.id}/builder`} className="btn btn-secondary">
                       Edit
                     </Link>
-                    <button className="btn bg-emerald-600" onClick={() => setRunningManifest(manifest)}>
+                    <button
+                      className="btn btn-secondary"
+                      onClick={() => setReadinessManifest(manifest)}
+                      title="Check whether the source database is ready for Copy changes. Read-only."
+                    >
+                      <ListChecks size={16} />
+                      Check change tracking
+                    </button>
+                    <button
+                      className="btn btn-secondary"
+                      onClick={() => { setRunKind('changes'); setLaunchError(null); setRunningManifest(manifest); }}
+                      title="Copy only what changed in the source since the last copy"
+                    >
+                      <History size={16} />
+                      Copy changes
+                    </button>
+                    <button className="btn bg-emerald-600" onClick={() => { setRunKind('bulk'); setLaunchError(null); setRunningManifest(manifest); }}>
                       <Play size={16} />
                       Start Run
                     </button>
@@ -325,6 +362,12 @@ export default function ApplicationDetail() {
           </div>
         </aside>
       </div>
+
+      <TrackedTablesPanel appId={appId} refreshKey={trackedRefresh} />
+
+      {readinessManifest && (
+        <ReadinessDialog appId={appId} manifest={readinessManifest} onClose={() => setReadinessManifest(null)} />
+      )}
 
       {bindingSlot && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
@@ -400,9 +443,17 @@ export default function ApplicationDetail() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
           <div className="card w-full max-w-xl">
             <h3 className="m-0 flex items-center gap-2 text-xl font-semibold">
-              <Play size={20} className="text-emerald-300" />
-              Start a run
+              {runKind === 'changes'
+                ? <><History size={20} className="text-sky-300" /> Copy changes</>
+                : <><Play size={20} className="text-emerald-300" /> Start a run</>}
             </h3>
+            {runKind === 'changes' && (
+              <p className="mt-2 text-sm text-slate-400">
+                Copies only what changed in the source since each table's last copy: new rows are added, changed rows
+                updated, deleted rows deleted. Nothing is emptied or recreated. Tables that have not had a bulk copy into
+                this destination yet are left out, and the run says which.
+              </p>
+            )}
             {/* whitespace-pre-line: a failed readiness check lists one line per check. */}
             {launchError && (
               <div className="mt-4 whitespace-pre-line rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-200">
@@ -454,8 +505,8 @@ export default function ApplicationDetail() {
               <div className="flex justify-end gap-3 pt-2">
                 <button type="button" className="btn btn-secondary" onClick={() => { setRunningManifest(null); setLaunchError(null); }}>Cancel</button>
                 <button type="submit" className="btn bg-emerald-600" disabled={launchLoading || oracleConnections.length === 0 || pgConnections.length === 0}>
-                  {launchLoading ? <RefreshCw size={16} className="spin" /> : <Play size={16} />}
-                  Start run
+                  {launchLoading ? <RefreshCw size={16} className="spin" /> : runKind === 'changes' ? <History size={16} /> : <Play size={16} />}
+                  {runKind === 'changes' ? 'Copy changes' : 'Start run'}
                 </button>
               </div>
             </form>

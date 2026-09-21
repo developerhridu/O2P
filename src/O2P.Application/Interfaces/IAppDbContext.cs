@@ -29,6 +29,7 @@ namespace O2P.Application.Interfaces
         DbSet<RunEvent> RunEvents { get; }
         DbSet<RunLog> RunLogs { get; }
         DbSet<TypeMappingRule> TypeMappingRules { get; }
+        DbSet<TrackedTable> TrackedTables { get; }
 
         DatabaseFacade Database { get; }
 

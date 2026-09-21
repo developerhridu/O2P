@@ -70,7 +70,7 @@ namespace O2P.Infrastructure.Oracle.Reader
 
             if (!string.IsNullOrWhiteSpace(whereClause))
             {
-                predicates.Add($"({ValidateReadOnlyWhereClause(whereClause)})");
+                predicates.Add($"({OracleValues.ValidateReadOnlyWhereClause(whereClause)})");
             }
 
             // Slice the chunk according to its strategy. pk_range carries numeric key bounds on
@@ -128,7 +128,7 @@ namespace O2P.Infrastructure.Oracle.Reader
             // returning the first row, so on a high-latency source the read produces no rows and the
             // chunk just re-leases forever ("stuck"). For LOB tables use a small prefetch and cap the
             // inline LOB fetch so large LOBs stream in instead of being buffered whole up front.
-            var hasLob = includedColumns.Any(c => IsOracleLob(c.OracleDataType));
+            var hasLob = includedColumns.Any(c => OracleValues.IsLob(c.OracleDataType));
             if (hasLob)
             {
                 cmd.FetchSize = 1 * 1024 * 1024;   // 1 MB prefetch so the first rows return promptly
@@ -153,7 +153,7 @@ namespace O2P.Infrastructure.Oracle.Reader
                 reader.GetValues(values);
                 for (var i = 0; i < values.Length; i++)
                 {
-                    values[i] = NormalizeOracleValue(values[i]);
+                    values[i] = OracleValues.Normalize(values[i]);
                 }
                 await outputChannel.WriteAsync(values, cancellationToken);
             }
@@ -170,56 +170,6 @@ namespace O2P.Infrastructure.Oracle.Reader
             if (type.Contains("bytea")) return Array.Empty<byte>();
             if (type.Contains("numeric")) return Convert.ToDecimal(row);
             return $"{tableName}_{column.ColumnName}_{row}";
-        }
-
-        private static readonly System.Collections.Generic.HashSet<string> LobOracleTypes =
-            new(System.StringComparer.OrdinalIgnoreCase) { "BLOB", "CLOB", "NCLOB", "LONG", "LONG RAW", "BFILE" };
-
-        // True for Oracle LOB types (as opposed to bounded RAW/VARCHAR2), which need LOB-aware fetch
-        // tuning to avoid stalling the read.
-        private static bool IsOracleLob(string? oracleType)
-        {
-            if (string.IsNullOrWhiteSpace(oracleType)) return false;
-            var baseType = oracleType.Trim().Split('(')[0].Trim().ToUpperInvariant();
-            return LobOracleTypes.Contains(baseType);
-        }
-
-        private static object NormalizeOracleValue(object value)
-        {
-            if (value == DBNull.Value)
-            {
-                return DBNull.Value;
-            }
-
-            if (value is string text)
-            {
-                var sanitized = text.Replace("\0", string.Empty);
-                return sanitized.Length == 0 ? DBNull.Value : sanitized;
-            }
-
-            if (value is double d && (double.IsNaN(d) || double.IsInfinity(d)))
-            {
-                return d;
-            }
-
-            if (value is float f && (float.IsNaN(f) || float.IsInfinity(f)))
-            {
-                return f;
-            }
-
-            return value;
-        }
-
-        private static string ValidateReadOnlyWhereClause(string whereClause)
-        {
-            var forbidden = new[] { ";", "--", "/*", "*/", " insert ", " update ", " delete ", " merge ", " drop ", " alter ", " create ", " execute ", " grant ", " revoke " };
-            var normalized = " " + whereClause.ToLowerInvariant() + " ";
-            if (forbidden.Any(normalized.Contains))
-            {
-                throw new ArgumentException("The manifest WHERE clause contains unsupported SQL.");
-            }
-
-            return whereClause;
         }
     }
 }

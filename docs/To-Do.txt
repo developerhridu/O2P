@@ -6,3 +6,4 @@
    behavior".
 2. Plan: Change track. new row + old rows updated.\
 3. Change Track feature
+4.  full run, which empties the destination and copies every row again

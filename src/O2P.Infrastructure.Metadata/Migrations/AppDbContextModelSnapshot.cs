@@ -581,6 +581,15 @@ namespace O2P.Infrastructure.Metadata.Migrations
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("text")
+                        .HasDefaultValue("bulk");
+
+                    b.Property<DateTimeOffset?>("LeaseExpiresAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<long>("ManifestId")
                         .HasColumnType("bigint");
 
@@ -601,6 +610,9 @@ namespace O2P.Infrastructure.Metadata.Migrations
 
                     b.Property<string>("TargetSlot")
                         .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("WorkerId")
                         .HasColumnType("text");
 
                     b.HasKey("Id");
@@ -960,11 +972,29 @@ namespace O2P.Infrastructure.Metadata.Migrations
                     b.Property<long>("JobRunId")
                         .HasColumnType("bigint");
 
+                    b.Property<bool?>("LoggingReadyAtStart")
+                        .HasColumnType("boolean");
+
                     b.Property<long>("ManifestTableId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("RowsDeleted")
                         .HasColumnType("bigint");
 
                     b.Property<long>("RowsMigrated")
                         .HasColumnType("bigint");
+
+                    b.Property<long>("RowsWritten")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("SourceKeyJson")
+                        .HasColumnType("jsonb");
+
+                    b.Property<string>("SourceObjectIdsJson")
+                        .HasColumnType("jsonb");
+
+                    b.Property<decimal?>("SourceStartScn")
+                        .HasColumnType("numeric");
 
                     b.Property<DateTimeOffset?>("StartedAt")
                         .HasColumnType("timestamp with time zone");
@@ -1039,6 +1069,92 @@ namespace O2P.Infrastructure.Metadata.Migrations
                         .IsUnique();
 
                     b.ToTable("target_name_allocations", "o2p");
+                });
+
+            modelBuilder.Entity("O2P.Domain.Entities.TrackedTable", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityAlwaysColumn(b.Property<long>("Id"));
+
+                    b.Property<long?>("ActiveJobRunId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("ColumnsJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("HeldBackByJson")
+                        .HasColumnType("jsonb");
+
+                    b.Property<string>("KeyColumnsJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<string>("LastError")
+                        .HasColumnType("text");
+
+                    b.Property<decimal?>("LastScn")
+                        .HasColumnType("numeric");
+
+                    b.Property<DateTimeOffset?>("LastSyncedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ObjectIdsJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<long?>("SetUpFromTableRunId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("SourceConnectionId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("SourceOwner")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("SourceTable")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<long>("TargetConnectionId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("TargetNameStyle")
+                        .HasColumnType("text");
+
+                    b.Property<string>("TargetSchema")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("TargetTableName")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("WhereClause")
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("SourceConnectionId", "SourceOwner", "SourceTable");
+
+                    b.HasIndex("TargetConnectionId", "TargetSchema", "TargetTableName")
+                        .IsUnique();
+
+                    b.ToTable("tracked_tables", "o2p");
                 });
 
             modelBuilder.Entity("O2P.Domain.Entities.TypeMappingRule", b =>
@@ -1122,6 +1238,19 @@ namespace O2P.Infrastructure.Metadata.Migrations
                     b.ToTable("ValidationResults", "o2p");
                 });
 
+            modelBuilder.Entity("O2P.Domain.Entities.WorkerControl", b =>
+                {
+                    b.Property<int>("Id")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTimeOffset?>("RestartRequestedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("worker_control", "o2p");
+                });
+
             modelBuilder.Entity("O2P.Domain.Entities.WorkerHeartbeat", b =>
                 {
                     b.Property<long>("Id")
@@ -1155,19 +1284,6 @@ namespace O2P.Infrastructure.Metadata.Migrations
                     b.HasIndex("LastSeenAt");
 
                     b.ToTable("worker_heartbeats", "o2p");
-                });
-
-            modelBuilder.Entity("O2P.Domain.Entities.WorkerControl", b =>
-                {
-                    b.Property<int>("Id")
-                        .HasColumnType("integer");
-
-                    b.Property<DateTimeOffset?>("RestartRequestedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.HasKey("Id");
-
-                    b.ToTable("worker_control", "o2p");
                 });
 
             modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRoleClaim<System.Guid>", b =>

@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
@@ -9,6 +10,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using O2P.Application.ChangeTracking;
 using O2P.Application.Core;
 using O2P.Application.Interfaces;
 using O2P.Application.Schema;
@@ -57,6 +59,9 @@ namespace O2P.Worker
             // recovered — jobs looked "stuck / not checked".
             _ = Task.Run(() => PollCommandsAsync(stoppingToken), stoppingToken);
             _ = Task.Run(() => PrepLoopAsync(stoppingToken), stoppingToken);
+            // Change copies run in their own loop: the prepare loop handles one job at a time, and a long
+            // mining pass inside it would hold up the preparation of every bulk run behind it.
+            _ = Task.Run(() => ChangesLoopAsync(stoppingToken), stoppingToken);
 
             while (!stoppingToken.IsCancellationRequested)
             {
@@ -118,6 +123,164 @@ namespace O2P.Worker
 
                 try { await Task.Delay(2000, stoppingToken); }
                 catch (OperationCanceledException) { return; }
+            }
+        }
+
+        /// <summary>This copier's name in change-run claims, fixed for its lifetime.</summary>
+        private readonly string _changeWorkerId = $"{Environment.MachineName}-{Guid.NewGuid():N}";
+
+        /// <summary>How long a change-run claim lasts without a heartbeat; after that another copier may take it over.</summary>
+        private static readonly TimeSpan ChangeRunLease = TimeSpan.FromMinutes(5);
+
+        /// <summary>
+        /// Picks up change copies, one at a time per copier. A run whose copier died is taken over once its
+        /// claim lapses and simply starts again - applying is repeatable, and each table's tracker only moved
+        /// if that table had fully finished.
+        /// </summary>
+        private async Task ChangesLoopAsync(CancellationToken stoppingToken)
+        {
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                try
+                {
+                    await ReleaseStaleTrackerClaimsAsync(stoppingToken);
+
+                    var jobId = await ClaimChangeRunAsync(stoppingToken);
+                    if (jobId != null)
+                    {
+                        await RunChangeJobAsync(jobId.Value, stoppingToken);
+                        continue; // look for the next one straight away
+                    }
+                }
+                catch (OperationCanceledException) { return; }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Change-copy loop iteration failed; backing off and retrying.");
+                }
+
+                try { await Task.Delay(3000, stoppingToken); }
+                catch (OperationCanceledException) { return; }
+            }
+        }
+
+        /// <summary>
+        /// A tracked table stays claimed only while its change run is going. A run that ended any other way
+        /// (cancel-all, a crash between runs) must not keep blocking the table.
+        /// </summary>
+        private async Task ReleaseStaleTrackerClaimsAsync(CancellationToken ct)
+        {
+            using var scope = _serviceProvider.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            await db.TrackedTables
+                .Where(t => t.ActiveJobRunId != null
+                    && !db.JobRuns.Any(j => j.Id == t.ActiveJobRunId && (j.Status == "Queued" || j.Status == "Running")))
+                .ExecuteUpdateAsync(s => s.SetProperty(t => t.ActiveJobRunId, (long?)null), ct);
+        }
+
+        private async Task<long?> ClaimChangeRunAsync(CancellationToken ct)
+        {
+            using var scope = _serviceProvider.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+            // Same pattern as batch claims: row lock with SKIP LOCKED, so two copiers never take one run.
+            const string sql = @"
+WITH claimed AS (
+    SELECT j.""Id"" FROM o2p.job_runs j
+    WHERE j.""Kind"" = 'changes'
+      AND (j.""Status"" = 'Queued' OR (j.""Status"" = 'Running' AND (j.""LeaseExpiresAt"" IS NULL OR j.""LeaseExpiresAt"" < now())))
+    ORDER BY j.""Id""
+    FOR UPDATE SKIP LOCKED
+    LIMIT 1
+)
+UPDATE o2p.job_runs j
+SET ""Status"" = 'Running', ""WorkerId"" = @worker, ""LeaseExpiresAt"" = now() + @lease, ""StartedAt"" = COALESCE(j.""StartedAt"", now())
+FROM claimed WHERE j.""Id"" = claimed.""Id""
+RETURNING j.""Id"";";
+
+            var conn = (NpgsqlConnection)db.Database.GetDbConnection();
+            await conn.OpenAsync(ct);
+            await using var tx = await conn.BeginTransactionAsync(ct);
+            await using var cmd = new NpgsqlCommand(sql, conn, tx);
+            cmd.Parameters.AddWithValue("worker", _changeWorkerId);
+            cmd.Parameters.AddWithValue("lease", ChangeRunLease);
+            var id = await cmd.ExecuteScalarAsync(ct);
+            await tx.CommitAsync(ct);
+            return id == null ? null : Convert.ToInt64(id);
+        }
+
+        private async Task RunChangeJobAsync(long jobId, CancellationToken stoppingToken)
+        {
+            using var scope = _serviceProvider.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var engine = scope.ServiceProvider.GetRequiredService<ChangeRunEngine>();
+            var secretProtector = scope.ServiceProvider.GetRequiredService<ISecretProtector>();
+
+            var job = await db.JobRuns.Include(j => j.Application).ThenInclude(a => a.Connections).FirstAsync(j => j.Id == jobId, stoppingToken);
+            var sourceId = job.Application.Connections.FirstOrDefault(c => c.Slot == job.SourceSlot)?.ConnectionId;
+            var targetId = job.Application.Connections.FirstOrDefault(c => c.Slot == job.TargetSlot)?.ConnectionId;
+            var source = sourceId == null ? null : await db.Connections.FindAsync(new object[] { sourceId.Value }, stoppingToken);
+            var target = targetId == null ? null : await db.Connections.FindAsync(new object[] { targetId.Value }, stoppingToken);
+            if (source == null || target == null)
+            {
+                job.Status = "Failed";
+                job.CompletedAt = DateTimeOffset.UtcNow;
+                await db.SaveChangesAsync(stoppingToken);
+                return;
+            }
+
+            _logger.LogInformation("Starting change copy {JobId}.", jobId);
+
+            // Keep the claim alive while this copier is working on it.
+            using var heartbeatStop = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+            var heartbeat = Task.Run(async () =>
+            {
+                while (!heartbeatStop.IsCancellationRequested)
+                {
+                    try
+                    {
+                        await Task.Delay(TimeSpan.FromMinutes(1), heartbeatStop.Token);
+                        using var hbScope = _serviceProvider.CreateScope();
+                        var hbDb = hbScope.ServiceProvider.GetRequiredService<AppDbContext>();
+                        await hbDb.JobRuns
+                            .Where(j => j.Id == jobId && j.WorkerId == _changeWorkerId)
+                            .ExecuteUpdateAsync(s => s.SetProperty(j => j.LeaseExpiresAt, DateTimeOffset.UtcNow + ChangeRunLease), heartbeatStop.Token);
+                    }
+                    catch (OperationCanceledException) { return; }
+                    catch (Exception ex) { _logger.LogWarning(ex, "Could not extend the claim on change copy {JobId}.", jobId); }
+                }
+            });
+
+            try
+            {
+                // One Oracle session slot for the whole copy - it mines, then reads rows, and must not push
+                // the copier past the source's session cap alongside bulk batches.
+                using (await _governor.AcquireOracleSessionAsync(stoppingToken))
+                {
+                    await engine.RunAsync(jobId,
+                        secretProtector.Unprotect(source.SecretCiphertext ?? Array.Empty<byte>()),
+                        secretProtector.Unprotect(target.SecretCiphertext ?? Array.Empty<byte>()),
+                        stoppingToken);
+                }
+                _logger.LogInformation("Change copy {JobId} finished.", jobId);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                // Shutting down. The claim lapses and another copier (or this one, restarted) takes over.
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Change copy {JobId} failed.", jobId);
+                await db.JobRuns.Where(j => j.Id == jobId && j.Status == "Running")
+                    .ExecuteUpdateAsync(s => s
+                        .SetProperty(j => j.Status, "Failed")
+                        .SetProperty(j => j.CompletedAt, DateTimeOffset.UtcNow)
+                        .SetProperty(j => j.WorkerId, (string?)null)
+                        .SetProperty(j => j.LeaseExpiresAt, (DateTimeOffset?)null), CancellationToken.None);
+            }
+            finally
+            {
+                heartbeatStop.Cancel();
+                try { await heartbeat; } catch { /* stopped */ }
             }
         }
 
@@ -487,7 +650,7 @@ RETURNING c.""Id"";";
 
                 var tableRun = await db.TableRuns
                     .Include(t => t.JobRun).ThenInclude(j => j.Application).ThenInclude(a => a.Connections)
-                    .Include(t => t.ManifestTable)
+                    .Include(t => t.ManifestTable).ThenInclude(m => m.Columns)
                     .FirstOrDefaultAsync(t => t.Id == tableRunId, cancellationToken);
                 if (tableRun == null) return;
 
@@ -515,6 +678,11 @@ RETURNING c.""Id"";";
                     var sourcePassword = secretProtector.Unprotect(sourceConn!.SecretCiphertext ?? new byte[0]);
                     var targetPassword = secretProtector.Unprotect(targetConn!.SecretCiphertext ?? new byte[0]);
 
+                    // Every batch is done and the constraints are back, which is all change tracking
+                    // needs. Set it up before the row-count check, and regardless of its result: against
+                    // a live source that check usually differs, and tracking is what closes the gap.
+                    await RegisterTrackedTableAsync(db, tableRun, sourceConnId, targetConnId, cancellationToken);
+
                     var result = await validator.ValidateTableRunAsync(tableRun, sourceConn, sourcePassword, targetConn, targetPassword, cancellationToken);
                     db.ValidationResults.Add(result);
 
@@ -536,6 +704,72 @@ RETURNING c.""Id"";";
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error checking or running validation.");
+            }
+        }
+
+        /// <summary>
+        /// Commands for a change run. Only cancel means anything: pause, resume and retry do not apply (the
+        /// API refuses them; a retry is simply a new change run), so any that arrive are ignored.
+        /// </summary>
+        private static async Task HandleChangeRunCommandAsync(AppDbContext db, JobRun job, JobCommand cmd, CancellationToken cancellationToken)
+        {
+            if (cmd.Command != "cancel") return;
+            if (job.Status is "Completed" or "CompletedWithErrors" or "Failed" or "Cancelled") return;
+
+            job.Status = "Cancelled";
+            job.CompletedAt = DateTimeOffset.UtcNow;
+
+            // Tables not started yet are settled here. A table being copied right now is settled by the
+            // change loop itself, which checks the run's status between batches - it alone knows what it
+            // has already applied.
+            await db.TableRuns
+                .Where(t => t.JobRunId == job.Id && t.Status == "Pending")
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(t => t.Status, "Cancelled")
+                    .SetProperty(t => t.CompletedAt, DateTimeOffset.UtcNow)
+                    .SetProperty(t => t.ErrorMessage, "Cancelled before it started. Nothing was changed in this table."), cancellationToken);
+        }
+
+        /// <summary>
+        /// Sets up (or refreshes) change tracking for a bulk table that just finished loading. A copy that
+        /// cannot be tracked is not an error - the bulk copy succeeded - so the reason is only recorded as a
+        /// run event for the operator to see.
+        /// </summary>
+        private async Task RegisterTrackedTableAsync(AppDbContext db, TableRun tableRun, long sourceConnectionId, long targetConnectionId, CancellationToken cancellationToken)
+        {
+            try
+            {
+                var (fresh, reason) = TrackedTableSetup.FromBulkCopy(
+                    tableRun, sourceConnectionId, targetConnectionId, tableRun.JobRun!.TargetSchema, DateTimeOffset.UtcNow);
+
+                if (fresh == null)
+                {
+                    db.RunEvents.Add(new RunEvent
+                    {
+                        JobRunId = tableRun.JobRunId,
+                        Actor = "system",
+                        Event = "table.not_trackable",
+                        DetailJson = JsonSerializer.Serialize(new { table = tableRun.TargetTableName, reason }),
+                        At = DateTimeOffset.UtcNow
+                    });
+                    await db.SaveChangesAsync(cancellationToken);
+                    return;
+                }
+
+                var existing = await db.TrackedTables.FirstOrDefaultAsync(t =>
+                    t.TargetConnectionId == targetConnectionId
+                    && t.TargetSchema == fresh.TargetSchema
+                    && t.TargetTableName == fresh.TargetTableName, cancellationToken);
+
+                if (existing == null) db.TrackedTables.Add(fresh);
+                else TrackedTableSetup.Apply(existing, fresh);
+
+                await db.SaveChangesAsync(cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                // Never let tracking bookkeeping fail a bulk copy that has already loaded its rows.
+                _logger.LogWarning(ex, "Could not set up change tracking for table run {TableRunId}.", tableRun.Id);
             }
         }
 
@@ -673,7 +907,13 @@ RETURNING c.""Id"";";
                         cmd.ProcessedAt = DateTimeOffset.UtcNow;
                         
                         var job = await db.JobRuns.FindAsync(new object[] { cmd.JobRunId }, cancellationToken);
-                        if (job != null)
+                        if (job != null && JobRunKind.IsChanges(job.Kind))
+                        {
+                            // Never the bulk handling below: its cancel restores constraints with a truncate
+                            // and its retry sends tables back through prepare, which empties them.
+                            await HandleChangeRunCommandAsync(db, job, cmd, cancellationToken);
+                        }
+                        else if (job != null)
                         {
                             if (cmd.Command == "launch" && job.Status == "Queued") job.Status = "Queued";
                             else if (cmd.Command == "pause") job.Status = "Paused";
@@ -786,9 +1026,12 @@ RETURNING c.""Id"";";
 
             // Queued jobs first; also pick Running jobs that still have Pending tables (Retry failed
             // after a cancel/planning failure) so StartTableRunAsync can plan them.
+            // Bulk runs only. Preparing a table creates or empties it, and a change run's tables are live
+            // tracked tables; change runs are claimed by their own loop instead.
             var job = await db.JobRuns
                 .Include(j => j.Application).ThenInclude(a => a.Connections)
                 .Include(j => j.TableRuns)
+                .Where(j => j.Kind != JobRunKind.Changes)
                 .Where(j => j.Status == "Queued"
                     || (j.Status == "Running" && j.TableRuns.Any(t => t.Status == "Pending")))
                 .OrderBy(j => j.Status == "Queued" ? 0 : 1)

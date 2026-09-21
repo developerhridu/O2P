@@ -7,6 +7,7 @@ using O2P.Domain.Entities;
 using O2P.Application.Core;
 using O2P.Application.Interfaces;
 using O2P.Application.Schema;
+using O2P.Api.Services;
 using System;
 using System.Linq;
 using System.Threading.Tasks;
@@ -244,13 +245,23 @@ namespace O2P.Api.Controllers
         [HttpPost("{id}/commands")]
         public async Task<IActionResult> CommandJob(long id, [FromBody] JobCommandRequest request)
         {
-            var jobExists = await _db.JobRuns.AnyAsync(j => j.Id == id);
-            if (!jobExists) return NotFound();
+            var jobKind = await _db.JobRuns.Where(j => j.Id == id).Select(j => j.Kind).FirstOrDefaultAsync();
+            if (jobKind == null) return NotFound();
 
             var allowed = new[] { "pause", "resume", "cancel", "retry_failed", "update_throttle" };
             if (!allowed.Contains(request.Command))
             {
                 return BadRequest("That action is not recognised.");
+            }
+
+            // A change copy can only be cancelled. Retrying it the bulk way would send its tables back
+            // through preparation, which empties them; the way to retry is simply another change copy,
+            // which picks up from where the last good one left off.
+            if (JobRunKind.IsChanges(jobKind) && request.Command != "cancel")
+            {
+                return BadRequest(request.Command == "retry_failed"
+                    ? "A change copy is not retried. Start a new one with Copy changes; it continues from where the last successful copy left off."
+                    : "A change copy can only be cancelled.");
             }
 
             var now = DateTimeOffset.UtcNow;
@@ -333,17 +344,9 @@ namespace O2P.Api.Controllers
                 return Conflict("A batch of this run is still finishing. Try again in a few seconds.");
             }
 
-            // Rows without a cascading link to the run (rejected rows, events, logs) and the optional graph
-            // link to a table run are removed explicitly, dependants first, all or nothing.
+            // All or nothing; see RunHistory for what has to be removed explicitly.
             await using var tx = await _db.Database.BeginTransactionAsync();
-            await _db.RowRejects
-                .Where(r => _db.TableRuns.Any(t => t.Id == r.TableRunId && t.JobRunId == id))
-                .ExecuteDeleteAsync();
-            await _db.MetricSamples.Where(m => m.JobRunId == id).ExecuteDeleteAsync();
-            await _db.RunEvents.Where(e => e.JobRunId == id).ExecuteDeleteAsync();
-            await _db.RunLogs.Where(l => l.JobRunId == id).ExecuteDeleteAsync();
-            await _db.JobCommands.Where(c => c.JobRunId == id).ExecuteDeleteAsync();
-            await _db.JobRuns.Where(j => j.Id == id).ExecuteDeleteAsync(); // tables, batches and checks cascade
+            await RunHistory.DeleteAsync(_db, _db.JobRuns.Where(j => j.Id == id).Select(j => j.Id));
             await tx.CommitAsync();
 
             return NoContent();

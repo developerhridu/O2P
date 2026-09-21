@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
+using O2P.Api.Services;
 using O2P.Domain.Entities;
 using O2P.Infrastructure.Metadata;
 using System.Collections.Generic;
@@ -50,6 +51,59 @@ namespace O2P.Api.Controllers
                 .FirstOrDefaultAsync(m => m.Id == id);
             if (manifest == null) return NotFound();
             return Ok(manifest);
+        }
+
+        public class RenameManifestRequest
+        {
+            public string? Name { get; set; }
+        }
+
+        /// <summary>Renames a table selection. Its tables, and the runs made from it, are untouched.</summary>
+        [HttpPatch("manifests/{id}")]
+        [Authorize(Roles = "Admin,Operator")]
+        public async Task<IActionResult> RenameManifest(long id, [FromBody] RenameManifestRequest request)
+        {
+            var manifest = await _db.Manifests.FirstOrDefaultAsync(m => m.Id == id);
+            if (manifest == null) return NotFound();
+
+            var name = request.Name?.Trim();
+            if (string.IsNullOrEmpty(name)) return BadRequest("Give the table selection a name.");
+            if (name.Length > 200) return BadRequest("That name is too long; keep it under 200 characters.");
+
+            // Names must be unique within a migration (and version) - the database enforces it too, but
+            // with an error nobody could read.
+            var lower = name.ToLower();
+            if (await _db.Manifests.AnyAsync(m => m.Id != id && m.ApplicationId == manifest.ApplicationId
+                                                  && m.Version == manifest.Version && m.Name.ToLower() == lower))
+            {
+                return Conflict($"This migration already has a table selection called \"{name}\". Choose a different name.");
+            }
+
+            manifest.Name = name;
+            await _db.SaveChangesAsync();
+            return Ok(manifest);
+        }
+
+        /// <summary>
+        /// Deletes a table selection and the history of every run made from it (the database would cascade
+        /// the runs anyway; this removes what it does not). Tables already copied into the destination, and
+        /// their change tracking, are left alone.
+        /// </summary>
+        [HttpDelete("manifests/{id}")]
+        [Authorize(Roles = "Admin,Operator")]
+        public async Task<IActionResult> DeleteManifest(long id)
+        {
+            if (!await _db.Manifests.AnyAsync(m => m.Id == id)) return NotFound();
+
+            var runs = _db.JobRuns.Where(j => j.ManifestId == id).Select(j => j.Id);
+            var blocked = await RunHistory.WhyNotDeletableAsync(_db, runs);
+            if (blocked != null) return Conflict(blocked);
+
+            await using var tx = await _db.Database.BeginTransactionAsync();
+            await RunHistory.DeleteAsync(_db, runs);
+            await _db.Manifests.Where(m => m.Id == id).ExecuteDeleteAsync(); // tables and columns cascade
+            await tx.CommitAsync();
+            return NoContent();
         }
 
         [HttpPut("manifests/{id}/tables")]

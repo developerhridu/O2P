@@ -12,6 +12,7 @@ namespace O2P.Application
             services.AddScoped<IValidationService, ValidationService>();
             services.AddScoped<IPreflightValidatorService, PreflightValidatorService>();
             services.AddScoped<MigrationEngine>();
+            services.AddScoped<ChangeRunEngine>();
             return services;
         }
     }
