@@ -330,7 +330,12 @@ ASP.NET Core environment variables use double underscores in place of JSON nesti
 | `Security__Cors__AllowedOrigins__N` | Required for remote UI origins | Local UI origins are listed in settings |
 | `Concurrency__MaxOracleSessions` | No | Worker default `8` |
 | `Concurrency__MaxChunkWorkers` | No | Worker default equals Oracle sessions; current JSON sets `8` |
-| `Concurrency__ChunkTimeoutMinutes` | No | `20`, clamped to at least 1 |
+| `Copying__RowsPerBatch` / `Copying__RowsPerLobBatch` | No | `200000` / `25000` rows per batch (tables with LOB columns use the second) |
+| `Copying__StallMinutes` | No | `10`: a batch is stopped only when no row has moved for this long |
+| `Copying__MaxBatchMinutes` | No | `0` = no absolute limit on one batch |
+| `Copying__MaxAttempts` | No | `5` automatic attempts per batch for connection failures and stalls |
+| `Copying__MaxRowsPerSecond` | No | `0` = no rate limit |
+| `Copying__InitialLobFetchSize` | No | `262144` bytes of each LOB fetched with its row |
 | `VITE_API_BASE_URL` | Required for separately hosted static UI | Otherwise `/api/v1` |
 
 The individual Windows scripts under `scripts/` expect pre-published output under `publish/api` and `publish/worker`; they are not source-development commands.
@@ -559,24 +564,24 @@ looser about nulls, is fine.
 
 ### Chunking, batch size, and concurrency
 
-There is no user-configurable batch-size option.
+Execution values (the `Copying` section of the Worker configuration; see Ops Runbook §6, "Bulk copy speed"):
 
-Implemented execution values:
-
-- planner target: `16` batches per table, hard-coded;
+- batches per table: estimated rows ÷ `Copying:RowsPerBatch` (200,000), or ÷ `Copying:RowsPerLobBatch` (25,000) for tables with LOB columns, between 1 and 2,000. When the size is unknown (no statistics, never counted), 16 batches are used. Run **Sync counts & sizes** before a large copy so the estimate is good;
 - bounded in-memory channel: `1,000` rows;
 - one PostgreSQL binary COPY transaction per batch;
-- fixed worker-wide rate limiter: `50,000` rows/second with a `10,000`-row burst;
+- rate limit: none by default (`Copying:MaxRowsPerSecond`);
 - Worker defaults: `8` Oracle sessions and `8` batch workers;
-- batch timeout: `20` minutes by default;
+- stall watchdog: a batch is stopped only when no row has moved for `Copying:StallMinutes` (10). A slow batch that is still moving is never stopped;
+- automatic retry: a batch that fails because a connection dropped, was refused or stalled goes back to the queue by itself after 30 s, 1 min, 2 min, then 5 min, up to `Copying:MaxAttempts` (5). Data errors are not retried;
+- running batches report their rows and bytes every 5 seconds, so the Runs page speed and MB/s are live;
 - metrics sample interval: `2` seconds.
 
-Configure effective concurrency in `src/O2P.Worker/appsettings.json`, `src/O2P.Worker/appsettings.Development.json`, or environment variables:
+Configure these in `src/O2P.Worker/appsettings.json`, `src/O2P.Worker/appsettings.Development.json`, or environment variables:
 
 ```powershell
 $env:Concurrency__MaxOracleSessions = "4"
 $env:Concurrency__MaxChunkWorkers = "4"
-$env:Concurrency__ChunkTimeoutMinutes = "30"
+$env:Copying__RowsPerLobBatch = "10000"
 ```
 
 The **Settings** screen stores values only in browser `localStorage`. It does not update the Worker, planner, rate limiter, validation, metrics interval, or retention behavior. Treat that screen as non-operational in the current version.
@@ -1070,12 +1075,12 @@ Planning and reading retry selected transient Oracle errors up to four attempts 
 
 O2P snapshots and temporarily drops local PK, UNIQUE, FK, CHECK constraints and inbound FKs. It does not snapshot/drop standalone indexes or triggers.
 
-### Batch timeout
+### Batch stalled or connection dropped
 
-- **Symptom:** batch fails with `Chunk timed out ... stall watchdog`.
-- **Cause:** slow Oracle query, LOB transfer, blocked PostgreSQL, network delay, or too-short timeout.
-- **Diagnose:** inspect Oracle/PostgreSQL activity and Worker logs.
-- **Solution:** remove the bottleneck, lower concurrency, or increase `Concurrency__ChunkTimeoutMinutes`, then use the safe recovery procedure in section 11.
+- **Symptom:** a batch shows `Attempt N failed: ... Trying again automatically`, or fails with `No row moved for 10 minutes ... (after 5 attempts)`.
+- **Cause:** a dropped or refused connection (common over a VPN), a blocked PostgreSQL table, or a source that stopped returning rows.
+- **Diagnose:** the Worker log records each attempt, and for every finished batch how long it spent waiting for Oracle and for PostgreSQL. Inspect Oracle/PostgreSQL activity for locks.
+- **Solution:** the retries are automatic; nothing needs doing for a brief outage. If a batch fails after all attempts, remove the cause, then use **Retry failed**, which restores the full set of attempts.
 
 Oracle commands also use a 600-second command timeout; PostgreSQL writer commands use 600 seconds.
 

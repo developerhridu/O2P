@@ -33,6 +33,10 @@ namespace O2P.Domain.Entities
         public DateTimeOffset? LeaseExpiresAt { get; set; } // Zombie fencing
 
         public int AttemptCount { get; set; } = 0;
+
+        // Set when a batch failed for a reason that can pass (a dropped connection, a stall) and was put
+        // back to Pending: it is not claimed again before this time. Null = claim whenever.
+        public DateTimeOffset? RetryAfter { get; set; }
         public string? ErrorMessage { get; set; }
 
         public DateTimeOffset? StartedAt { get; set; }

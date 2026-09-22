@@ -1,5 +1,6 @@
 using Npgsql;
 using NpgsqlTypes;
+using O2P.Application.Copying;
 using O2P.Application.Interfaces;
 using O2P.Application.Schema;
 using O2P.Domain.Entities;
@@ -16,7 +17,7 @@ namespace O2P.Infrastructure.Postgres.Writer
 {
     public class PostgresBinaryWriter : IPostgresBinaryWriter
     {
-        public async Task<long> WriteDataAsync(Connection connection, string password, string targetSchema, string targetTable, IReadOnlyList<ManifestColumn> columns, string? targetNameStyle, long jobRunId, long tableRunId, int chunkIndex, ChannelReader<object[]> inputChannel, CancellationToken cancellationToken)
+        public async Task<long> WriteDataAsync(Connection connection, string password, string targetSchema, string targetTable, IReadOnlyList<ManifestColumn> columns, string? targetNameStyle, long jobRunId, long tableRunId, int chunkIndex, ChannelReader<object[]> inputChannel, ChunkProgress? progress, CancellationToken cancellationToken)
         {
             if (connection.Host.Equals("mock", System.StringComparison.OrdinalIgnoreCase))
             {
@@ -24,6 +25,7 @@ namespace O2P.Infrastructure.Postgres.Writer
                 await foreach (var row in inputChannel.ReadAllAsync(cancellationToken))
                 {
                     rows++;
+                    progress?.RowWritten(RowBytes(row));
                 }
                 return rows;
             }
@@ -39,7 +41,10 @@ namespace O2P.Infrastructure.Postgres.Writer
                 MinPoolSize = 1,
                 MaxPoolSize = 100,
                 Timeout = 60,
-                CommandTimeout = 600
+                CommandTimeout = 600,
+                // Keepalive every 30 s so a VPN or firewall does not silently drop a connection that sits
+                // idle while the reader waits on Oracle.
+                KeepAlive = 30
             };
 
             await using var conn = new NpgsqlConnection(csb.ConnectionString);
@@ -98,6 +103,7 @@ RETURNING chunk_index;";
                 {
                     await PostgresWritePlan.WriteRowAsync(importer, row, columnPlans, cancellationToken);
                     rowsWritten++;
+                    progress?.RowWritten(RowBytes(row));
                 }
 
                 await importer.CompleteAsync(cancellationToken);
@@ -105,6 +111,13 @@ RETURNING chunk_index;";
 
             await tx.CommitAsync(cancellationToken);
             return rowsWritten;
+        }
+
+        private static long RowBytes(object[] row)
+        {
+            long bytes = 0;
+            foreach (var value in row) bytes += ChunkProgress.SizeOf(value);
+            return bytes;
         }
 
         private static async Task DrainAsync(ChannelReader<object[]> inputChannel, CancellationToken cancellationToken)

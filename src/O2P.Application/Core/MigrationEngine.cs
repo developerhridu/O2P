@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using O2P.Application.Copying;
 using O2P.Application.Interfaces;
 using O2P.Application.Schema;
 using O2P.Domain.Entities;
@@ -21,6 +22,7 @@ namespace O2P.Application.Core
         private readonly IPostgresConstraintManager _constraintManager;
         private readonly IPostgresSchemaInspector _schemaInspector;
         private readonly IOracleChangeSource _changeSource;
+        private readonly CopyTuningOptions _tuning;
 
         public MigrationEngine(
             IAppDbContext db,
@@ -28,8 +30,10 @@ namespace O2P.Application.Core
             IPostgresDdlExecutor ddlExecutor,
             IPostgresConstraintManager constraintManager,
             IPostgresSchemaInspector schemaInspector,
-            IOracleChangeSource changeSource)
+            IOracleChangeSource changeSource,
+            CopyTuningOptions tuning)
         {
+            _tuning = tuning;
             _db = db;
             _chunkPlanner = chunkPlanner;
             _ddlExecutor = ddlExecutor;
@@ -297,6 +301,13 @@ namespace O2P.Application.Core
                 tableRun.SourceKeyJson = startPoint.Key == null ? null : System.Text.Json.JsonSerializer.Serialize(startPoint.Key, ChangeTracking.TrackedTableSetup.Json);
                 await _db.SaveChangesAsync(cancellationToken);
 
+                // Batches sized by the table, not a fixed 16: see BatchPlan. LOB tables are recognised
+                // from their column types - the HasLobs flag depends on LOB-size statistics that are
+                // often missing.
+                var hasLobs = tableRun.ManifestTable.HasLobs
+                    || tableRun.ManifestTable.Columns.Any(c => !c.IsExcluded && IsLobType(c.OracleDataType));
+                var batchCount = BatchPlan.CountFor(tableRun.ManifestTable.EstRows, hasLobs, _tuning);
+
                 var chunks = await _chunkPlanner.PlanChunksAsync(
                     sourceConn!,
                     oraclePassword,
@@ -304,7 +315,7 @@ namespace O2P.Application.Core
                     tableRun.ManifestTable.TableName,
                     tableRun.ManifestTable.IsPartitioned,
                     tableRun.ManifestTable.IsIot,
-                    16,
+                    batchCount,
                     cancellationToken
                 );
 
@@ -339,6 +350,12 @@ namespace O2P.Application.Core
 
                 throw;
             }
+        }
+
+        private static bool IsLobType(string? oracleType)
+        {
+            var type = (oracleType ?? string.Empty).Trim().Split('(')[0].Trim().ToUpperInvariant();
+            return type is "BLOB" or "CLOB" or "NCLOB" or "LONG" or "LONG RAW" or "BFILE";
         }
 
         /// <summary>

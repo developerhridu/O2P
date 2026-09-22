@@ -338,6 +338,9 @@ namespace O2P.Infrastructure.Metadata.Migrations
                     b.Property<string>("PartitionName")
                         .HasColumnType("text");
 
+                    b.Property<DateTimeOffset?>("RetryAfter")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<long>("RowsMigrated")
                         .HasColumnType("bigint");
 

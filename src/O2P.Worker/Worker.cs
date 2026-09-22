@@ -11,6 +11,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using O2P.Application.ChangeTracking;
+using O2P.Application.Copying;
 using O2P.Application.Core;
 using O2P.Application.Interfaces;
 using O2P.Application.Schema;
@@ -27,7 +28,9 @@ namespace O2P.Worker
         private readonly GlobalGovernor _governor;
         private readonly IHostApplicationLifetime _lifetime;
         private readonly IConfiguration _configuration;
-        private readonly TokenBucketRateLimiter _rateLimiter = new TokenBucketRateLimiter(50000, 10000);
+        private readonly CopyTuningOptions _tuning;
+        // Null unless Copying:MaxRowsPerSecond is set: an unused limiter still took a lock per row.
+        private readonly TokenBucketRateLimiter? _rateLimiter;
         private DateTimeOffset _workerStartedAt;
 
         public Worker(
@@ -35,13 +38,19 @@ namespace O2P.Worker
             IServiceProvider serviceProvider,
             GlobalGovernor governor,
             IHostApplicationLifetime lifetime,
-            IConfiguration configuration)
+            IConfiguration configuration,
+            CopyTuningOptions tuning)
         {
             _logger = logger;
             _serviceProvider = serviceProvider;
             _governor = governor;
             _lifetime = lifetime;
             _configuration = configuration;
+            _tuning = tuning;
+            if (tuning.MaxRowsPerSecond > 0)
+            {
+                _rateLimiter = new TokenBucketRateLimiter(tuning.MaxRowsPerSecond, Math.Max(1000, tuning.MaxRowsPerSecond / 5));
+            }
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -364,6 +373,7 @@ WITH claimed AS (
     JOIN o2p.table_runs t ON t.""Id"" = c.""TableRunId""
     JOIN o2p.job_runs j ON j.""Id"" = t.""JobRunId""
     WHERE c.""Status"" = 'Pending'
+      AND (c.""RetryAfter"" IS NULL OR c.""RetryAfter"" <= now())
       AND t.""Status"" = 'Loading'
       AND j.""Status"" = 'Running'
     ORDER BY c.""Id""
@@ -400,13 +410,19 @@ RETURNING c.""Id"";";
 
             long rowsWritten = 0;
             bool chunkSucceeded = false;
-            var chunkTimeoutMinutes = Math.Max(1, _configuration.GetValue("Concurrency:ChunkTimeoutMinutes", 20));
+            var progress = new ChunkProgress();
+            var batchClock = System.Diagnostics.Stopwatch.StartNew();
+            var stallLimit = TimeSpan.FromMinutes(Math.Max(1, _tuning.StallMinutes));
 
-            // Absolute ceiling so a hung Oracle/PG call cannot occupy a worker slot forever.
-            // Heartbeats keep the DB lease alive while the process is running; without this
-            // CancelAfter, stalled chunks never fail and the pool looks "stuck".
-            using var chunkCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            chunkCts.CancelAfter(TimeSpan.FromMinutes(chunkTimeoutMinutes));
+            // Three ways a batch is stopped from outside: the stall watchdog (no row moved for StallMinutes -
+            // a slow batch that is still moving is left alone, unlike the old fixed 20-minute limit, which
+            // stopped batches mid-copy and threw their work away); the optional absolute limit; and one side
+            // failing, which stops the other instead of leaving it waiting.
+            using var stallCts = new CancellationTokenSource();
+            using var limitCts = new CancellationTokenSource();
+            using var pairCts = new CancellationTokenSource();
+            if (_tuning.MaxBatchMinutes > 0) limitCts.CancelAfter(TimeSpan.FromMinutes(_tuning.MaxBatchMinutes));
+            using var chunkCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, stallCts.Token, limitCts.Token, pairCts.Token);
             var chunkToken = chunkCts.Token;
 
             // Keep the chunk's lease fresh while it is actively processing. A large single chunk (e.g.
@@ -433,6 +449,43 @@ RETURNING c.""Id"";";
                     catch (Exception ex) { _logger.LogWarning(ex, "Lease heartbeat failed for chunk {ChunkId}.", heartbeatChunkId); }
                 }
             });
+
+            // Every 5 s: stop the batch if nothing has moved for the stall time, otherwise publish its rows and
+            // bytes so far, so the Runs page counts while a batch is in flight instead of jumping at its end.
+            var watcher = Task.Run(async () =>
+            {
+                long lastRows = -1;
+                while (!leaseCts.IsCancellationRequested)
+                {
+                    try { await Task.Delay(TimeSpan.FromSeconds(5), leaseCts.Token); }
+                    catch (OperationCanceledException) { break; }
+
+                    if (progress.SinceLastProgress > stallLimit)
+                    {
+                        _logger.LogWarning("Chunk {ChunkId}: no row has moved for {Minutes} minutes; stopping it.", heartbeatChunkId, stallLimit.TotalMinutes);
+                        stallCts.Cancel();
+                        break;
+                    }
+
+                    var rows = progress.Rows;
+                    if (rows == lastRows) continue;
+                    lastRows = rows;
+                    var bytes = progress.Bytes;
+                    try
+                    {
+                        using var pScope = _serviceProvider.CreateScope();
+                        var pDb = pScope.ServiceProvider.GetRequiredService<AppDbContext>();
+                        await pDb.ChunkLogs
+                            .Where(c => c.Id == heartbeatChunkId && c.Status == "Running")
+                            .ExecuteUpdateAsync(s => s
+                                .SetProperty(c => c.RowsMigrated, rows)
+                                .SetProperty(c => c.BytesMigrated, bytes), CancellationToken.None);
+                    }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Progress update failed for chunk {ChunkId}.", heartbeatChunkId); }
+                }
+            });
+
+            Exception? firstFailure = null;
 
             try
             {
@@ -461,8 +514,24 @@ RETURNING c.""Id"";";
                     pendingChunk,
                     channel.Writer,
                     _rateLimiter,
+                    progress,
                     chunkToken
                 );
+
+                // Whichever side fails first stops the other at once. The reader already hands its error to the
+                // writer through the channel; a failed writer used to leave the reader blocked on a full channel
+                // until the 20-minute limit, which is why every lost batch in the logs reported at 1,200 s.
+                async Task Paired(Task side)
+                {
+                    try { await side; }
+                    catch (Exception ex)
+                    {
+                        Interlocked.CompareExchange(ref firstFailure, ex, null);
+                        channel.Writer.TryComplete(ex);
+                        pairCts.Cancel();
+                        throw;
+                    }
+                }
 
                 var writerTask = pgWriter.WriteDataAsync(
                     pgConnection,
@@ -475,12 +544,14 @@ RETURNING c.""Id"";";
                     pendingChunk.TableRunId,
                     pendingChunk.ChunkIndex,
                     channel.Reader,
+                    progress,
                     chunkToken
                 );
 
-                await Task.WhenAll(readerTask, writerTask);
+                await Task.WhenAll(Paired(readerTask), Paired(writerTask));
 
                 rowsWritten = writerTask.Result;
+                var bytesWritten = progress.Bytes;
 
                 // Only mark Done if still Running — a Cancel command may have set Cancelled mid-flight.
                 var markedDone = await db.ChunkLogs
@@ -490,47 +561,98 @@ RETURNING c.""Id"";";
                         .SetProperty(c => c.CompletedAt, DateTimeOffset.UtcNow)
                         .SetProperty(c => c.LeaseExpiresAt, (DateTimeOffset?)null)
                         .SetProperty(c => c.RowsMigrated, rowsWritten)
+                        .SetProperty(c => c.BytesMigrated, bytesWritten)
+                        .SetProperty(c => c.RetryAfter, (DateTimeOffset?)null)
                         .SetProperty(c => c.ErrorMessage, (string?)null), CancellationToken.None);
 
                 chunkSucceeded = markedDone > 0;
                 if (chunkSucceeded)
                 {
-                    _logger.LogInformation($"Successfully completed chunk {pendingChunk.Id}. Rows: {rowsWritten}");
+                    LogBatchSummary(pendingChunk, rowsWritten, bytesWritten, batchClock.Elapsed, progress);
                 }
                 else
                 {
                     _logger.LogWarning("Chunk {ChunkId} finished after cancel/lease change; not marking Done.", pendingChunk.Id);
                 }
             }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            catch (Exception caught)
             {
-                _logger.LogError(
-                    "Chunk {ChunkId} timed out after {Minutes} minutes (stall watchdog).",
-                    pendingChunk.Id, chunkTimeoutMinutes);
-                await db.ChunkLogs
-                    .Where(c => c.Id == pendingChunk.Id && c.Status == "Running")
-                    .ExecuteUpdateAsync(s => s
-                        .SetProperty(c => c.Status, "Failed")
-                        .SetProperty(c => c.ErrorMessage,
-                            $"Chunk timed out after {chunkTimeoutMinutes} minutes with no completion and was stopped. Use Retry failed to try it again.")
-                        .SetProperty(c => c.LeaseExpiresAt, (DateTimeOffset?)null)
-                        .SetProperty(c => c.CompletedAt, DateTimeOffset.UtcNow), CancellationToken.None);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, $"Chunk {pendingChunk.Id} failed.");
-                await db.ChunkLogs
-                    .Where(c => c.Id == pendingChunk.Id && c.Status == "Running")
-                    .ExecuteUpdateAsync(s => s
-                        .SetProperty(c => c.Status, "Failed")
-                        .SetProperty(c => c.ErrorMessage, ex.Message)
-                        .SetProperty(c => c.LeaseExpiresAt, (DateTimeOffset?)null)
-                        .SetProperty(c => c.CompletedAt, DateTimeOffset.UtcNow), CancellationToken.None);
+                // The side that failed first says why; the other side only saw the cancellation that followed.
+                var failure = firstFailure is not null && firstFailure is not OperationCanceledException ? firstFailure : caught;
+                var stalled = stallCts.IsCancellationRequested;
+                var overLimit = !stalled && limitCts.IsCancellationRequested;
+                var shuttingDown = cancellationToken.IsCancellationRequested && !stalled && !overLimit;
+                var attempt = pendingChunk.AttemptCount;
+
+                string reason = stalled
+                    ? $"No row moved for {stallLimit.TotalMinutes:0} minute{(stallLimit.TotalMinutes == 1 ? "" : "s")}, so the batch was stopped - usually a connection that died without saying so."
+                    : overLimit
+                        ? $"The batch ran longer than the {_tuning.MaxBatchMinutes}-minute limit (Copying:MaxBatchMinutes) and was stopped."
+                        : shuttingDown
+                            ? "The Worker was stopping."
+                            : failure.Message;
+
+                if (shuttingDown)
+                {
+                    // Not the batch's fault: put it straight back so the next Worker start picks it up.
+                    _logger.LogWarning("Chunk {ChunkId} interrupted by Worker shutdown; returned to the queue.", pendingChunk.Id);
+                    await db.ChunkLogs
+                        .Where(c => c.Id == pendingChunk.Id && c.Status == "Running")
+                        .ExecuteUpdateAsync(s => s
+                            .SetProperty(c => c.Status, "Pending")
+                            .SetProperty(c => c.AttemptCount, c => c.AttemptCount - 1)
+                            .SetProperty(c => c.WorkerId, (string?)null)
+                            .SetProperty(c => c.LeaseExpiresAt, (DateTimeOffset?)null)
+                            .SetProperty(c => c.RowsMigrated, 0L)
+                            .SetProperty(c => c.BytesMigrated, 0L), CancellationToken.None);
+                }
+                else if (attempt < _tuning.MaxAttempts && ChunkFailure.IsWorthRetrying(failure, attempt, stalled))
+                {
+                    // A dropped connection, a stall, a restarting database: try again by itself after a wait.
+                    // The batch was one transaction, so nothing of it was kept, and the resume fence stops a
+                    // later attempt writing anything twice.
+                    var retryAt = DateTimeOffset.UtcNow + BatchPlan.RetryDelay(attempt);
+                    _logger.LogWarning(failure,
+                        "Chunk {ChunkId} attempt {Attempt} of {Max} failed after {Seconds:0}s: {Reason} Trying again at {RetryAt:HH:mm:ss}.",
+                        pendingChunk.Id, attempt, _tuning.MaxAttempts, batchClock.Elapsed.TotalSeconds, reason, retryAt.ToLocalTime());
+                    await db.ChunkLogs
+                        .Where(c => c.Id == pendingChunk.Id && c.Status == "Running")
+                        .ExecuteUpdateAsync(s => s
+                            .SetProperty(c => c.Status, "Pending")
+                            .SetProperty(c => c.RetryAfter, retryAt)
+                            .SetProperty(c => c.ErrorMessage, $"Attempt {attempt} failed: {reason} Trying again automatically.")
+                            .SetProperty(c => c.WorkerId, (string?)null)
+                            .SetProperty(c => c.LeaseExpiresAt, (DateTimeOffset?)null)
+                            .SetProperty(c => c.RowsMigrated, 0L)
+                            .SetProperty(c => c.BytesMigrated, 0L), CancellationToken.None);
+                }
+                else
+                {
+                    var message = attempt > 1 ? $"{reason} (after {attempt} attempts)" : reason;
+                    if (!stalled && attempt >= 2 && IsOracleError(failure, ChunkFailure.ObjectNoLongerExists))
+                    {
+                        message = "The source table was changed (moved, truncated or rebuilt) while it was being copied, twice. " +
+                                  "Retry when maintenance on the source has finished. " + failure.Message;
+                    }
+
+                    _logger.LogError(failure, "Chunk {ChunkId} failed after {Seconds:0}s (attempt {Attempt}): {Reason}",
+                        pendingChunk.Id, batchClock.Elapsed.TotalSeconds, attempt, reason);
+                    await db.ChunkLogs
+                        .Where(c => c.Id == pendingChunk.Id && c.Status == "Running")
+                        .ExecuteUpdateAsync(s => s
+                            .SetProperty(c => c.Status, "Failed")
+                            .SetProperty(c => c.ErrorMessage, message)
+                            .SetProperty(c => c.LeaseExpiresAt, (DateTimeOffset?)null)
+                            .SetProperty(c => c.RowsMigrated, 0L)
+                            .SetProperty(c => c.BytesMigrated, 0L)
+                            .SetProperty(c => c.CompletedAt, DateTimeOffset.UtcNow), CancellationToken.None);
+                }
             }
             finally
             {
                 leaseCts.Cancel();
                 try { await leaseHeartbeat; } catch { /* heartbeat cancellation is expected */ }
+                try { await watcher; } catch { /* watcher cancellation is expected */ }
             }
 
             // Roll the completed chunk's row count up to its parent table run with an atomic,
@@ -539,15 +661,45 @@ RETURNING c.""Id"";";
             // scopes, silently undercounting migration progress.
             if (chunkSucceeded && rowsWritten > 0)
             {
+                var bytes = progress.Bytes;
                 await db.TableRuns
                     .Where(t => t.Id == pendingChunk.TableRunId)
-                    .ExecuteUpdateAsync(s => s.SetProperty(t => t.RowsMigrated, t => t.RowsMigrated + rowsWritten), CancellationToken.None);
+                    .ExecuteUpdateAsync(s => s
+                        .SetProperty(t => t.RowsMigrated, t => t.RowsMigrated + rowsWritten)
+                        .SetProperty(t => t.BytesMigrated, t => t.BytesMigrated + bytes), CancellationToken.None);
             }
 
             // Evaluate table-run (and job) completion now that this chunk reached a terminal state.
             _ = Task.Run(() => CheckAndRunValidationAsync(pendingChunk.TableRunId, CancellationToken.None), CancellationToken.None);
 
             return true;
+        }
+
+        /// <summary>
+        /// One line per batch saying where its time went, which answers "is it Oracle, PostgreSQL or the
+        /// link?" without guessing. Waiting for Oracle includes the network from Oracle; waiting for
+        /// PostgreSQL is the reader blocked because the writer had not taken rows yet.
+        /// </summary>
+        private void LogBatchSummary(ChunkLog chunk, long rows, long bytes, TimeSpan elapsed, ChunkProgress progress)
+        {
+            var total = Math.Max(1, elapsed.Ticks);
+            var sourcePct = 100.0 * progress.WaitingForSource.Ticks / total;
+            var destinationPct = 100.0 * progress.WaitingForDestination.Ticks / total;
+            var seconds = Math.Max(0.001, elapsed.TotalSeconds);
+            _logger.LogInformation(
+                "Successfully completed chunk {ChunkId} ({Table} #{ChunkIndex}). Rows: {Rows}, {MB:0.0} MB in {Seconds:0.0}s " +
+                "({RowsPerSecond:0} rows/s, {MBPerSecond:0.00} MB/s) - {SourcePct:0}% waiting for Oracle, {DestinationPct:0}% waiting for PostgreSQL.",
+                chunk.Id, chunk.TableRun?.ManifestTable?.TableName, chunk.ChunkIndex, rows, bytes / (1024.0 * 1024.0), seconds,
+                rows / seconds, bytes / (1024.0 * 1024.0) / seconds, sourcePct, destinationPct);
+        }
+
+        private static bool IsOracleError(Exception exception, int number)
+        {
+            for (var e = exception; e != null; e = e.InnerException)
+            {
+                if (e is Oracle.ManagedDataAccess.Client.OracleException oracle && oracle.Number == number) return true;
+            }
+            return false;
         }
 
         private static async Task<long?> ClaimChunkIdAsync(AppDbContext db, string claimSql, string workerId, CancellationToken cancellationToken)
@@ -970,6 +1122,9 @@ RETURNING c.""Id"";";
                                         .SetProperty(c => c.ErrorMessage, (string?)null)
                                         .SetProperty(c => c.LeaseExpiresAt, (DateTimeOffset?)null)
                                         .SetProperty(c => c.CompletedAt, (DateTimeOffset?)null)
+                                        // A manual retry gets the full set of automatic attempts again, straight away.
+                                        .SetProperty(c => c.AttemptCount, 0)
+                                        .SetProperty(c => c.RetryAfter, (DateTimeOffset?)null)
                                         .SetProperty(c => c.WorkerId, (string?)null), cancellationToken);
 
                                 // Table runs that failed during planning (e.g. a transient Oracle

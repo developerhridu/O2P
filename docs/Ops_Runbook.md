@@ -61,7 +61,59 @@ setup: User Guide, *Keep the destination up to date*.
   solution; see its project file). End to end: `scripts/verify-change-tracking.mjs` and
   `scripts/verify-change-tracking-ui.mjs`.
 
-## 6. Preflight Validation
+## 6. Bulk Copy Speed
+
+**Where the Worker runs matters most.** Every row is read from Oracle into the Worker and written from the
+Worker to PostgreSQL. With the Worker across a VPN from the databases, every row, and every image in a LOB
+column, crosses the tunnel twice, and the tunnel's bandwidth becomes the speed limit: eight batches at once
+are then barely faster than one. Run the Worker on a server in the same network as the databases, ideally
+near both. It needs only the metadata database and the two database ports (`scripts/run-worker.ps1`).
+
+**Reading the log.** Each finished batch logs one line:
+
+```text
+Successfully completed chunk 1217 (BS_LOB #0). Rows: 100, 20.2 MB in 1.2s (84 rows/s, 16.93 MB/s) - 37% waiting for Oracle, 0% waiting for PostgreSQL.
+```
+
+- Mostly *waiting for Oracle*: the read side (the Oracle query, or the network from Oracle) is the limit.
+- Mostly *waiting for PostgreSQL*: the write side (the destination, or the network to it) is the limit.
+- Both low: the Worker itself (CPU) is the limit; add batch workers.
+
+**Settings** (`Copying` section of the Worker configuration, or `Copying__Name` environment variables):
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `RowsPerBatch` | 200000 | Rows per batch for ordinary tables |
+| `RowsPerLobBatch` | 25000 | Rows per batch for tables with LOB columns |
+| `MaxBatchesPerTable` | 2000 | Upper bound on batches per table |
+| `BatchesWhenSizeUnknown` | 16 | Used when the table has no statistics and was never counted |
+| `StallMinutes` | 10 | Stop a batch only when no row has moved for this long |
+| `MaxBatchMinutes` | 0 | Optional absolute limit per batch (0 = none) |
+| `MaxAttempts` | 5 | Automatic attempts for connection failures and stalls (30 s, 1 min, 2 min, 5 min apart) |
+| `MaxRowsPerSecond` | 0 | Worker-wide rate limit (0 = none) |
+| `InitialLobFetchSize` | 262144 | Bytes of each LOB fetched with its row; larger LOBs cost an extra round trip each |
+| `RowsPerRoundTrip` / `MaxFetchBytes` | 100 / 32 MB | Rows per Oracle round trip for LOB tables, and the memory cap for that buffer |
+
+Batches are sized from each table's estimated rows, so run **Sync counts & sizes** before a large copy.
+Short batches matter over a WAN: a dropped connection loses one batch, a few seconds of work, and the batch
+is retried by itself. The resume fence (`_o2p_chunk_log` in the target schema) ensures a retried batch never
+writes a row twice. Both drivers send TCP keepalives, so an idle connection is not silently dropped by a
+firewall or VPN.
+
+If your LOBs are mostly larger than 256 KB, raise `InitialLobFetchSize` (for example to 1048576). Each LOB
+column then reserves that much per row in the fetch buffer, so fewer rows travel per round trip; the buffer
+stays capped at `MaxFetchBytes`.
+
+**Speed graph.** MB/s on the Runs page is measured: bytes for binary values, characters for text, fixed sizes
+for numbers and dates.
+
+End to end check: `scripts/verify-bulk-speed.mjs` (throwaway databases only).
+
+**Upgrading:** `Concurrency:ChunkTimeoutMinutes` is no longer read. The fixed 20-minute limit it set
+stopped batches that were still copying. Restart the API first, which applies migration
+`M16_ChunkRetryAfter`, then restart the Worker.
+
+## 7. Preflight Validation
 
 Always run the preflight check before starting a massive migration:
 `POST /api/v1/jobs/{id}/preflight`

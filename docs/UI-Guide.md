@@ -696,7 +696,8 @@ Suggested sign-off list:
 | **Readiness check failed** | Fix the named cause (see [Step 5](#91-what-happens-on-launch)), then click **Start Run** again |
 | **A table is Failed** | Expand it and read the red error text and the red batch tooltips. Fix the cause, then **start a new job** (below) |
 | **CompletedWithErrors, count mismatch** | Usually the source changed during the run, a target trigger/constraint interfered, or a filter was set. Fix, then re-run |
-| **Batch timed out** (`Chunk timed out after N minutes … (stall watchdog)`) | A slow read or network issue. Ask your administrator to lower concurrency or raise the timeout, then re-run |
+| **Attempt N failed … Trying again automatically** | A connection dropped or the batch stopped moving. Nothing to do: it is queued again by itself after a short wait |
+| **No row moved for N minutes … (after 5 attempts)** | The problem did not clear. Ask your administrator to check the network and the databases, then use **Retry failed** |
 | **Wrong tables/filters** | Edit the table selection, save, and launch a new job |
 | **Want to stop** | **Cancel job**. The target tables being loaded are emptied |
 
