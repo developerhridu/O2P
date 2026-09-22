@@ -26,7 +26,7 @@ namespace O2P.Infrastructure.Oracle.Validation
                 Pooling = true
             };
 
-            using var oracleConn = new OracleConnection(oracleCsb.ConnectionString);
+            using var oracleConn = OracleConnectionSettings.Create(oracleCsb);
             await oracleConn.OpenAsync(cancellationToken);
             
             // Quote the identifiers to match how the reader addresses the same table (case-exact),

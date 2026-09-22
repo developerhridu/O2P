@@ -24,7 +24,7 @@ namespace O2P.Infrastructure.Postgres.Schema
                 Pooling = false
             };
 
-            using var conn = new NpgsqlConnection(csb.ConnectionString);
+            using var conn = new NpgsqlConnection(PostgresConnectionSettings.Harden(csb).ConnectionString);
             await conn.OpenAsync(cancellationToken);
 
             using var cmd = conn.CreateCommand();

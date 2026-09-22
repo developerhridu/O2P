@@ -97,8 +97,24 @@ Successfully completed chunk 1217 (BS_LOB #0). Rows: 100, 20.2 MB in 1.2s (84 ro
 Batches are sized from each table's estimated rows, so run **Sync counts & sizes** before a large copy.
 Short batches matter over a WAN: a dropped connection loses one batch, a few seconds of work, and the batch
 is retried by itself. The resume fence (`_o2p_chunk_log` in the target schema) ensures a retried batch never
-writes a row twice. Both drivers send TCP keepalives, so an idle connection is not silently dropped by a
-firewall or VPN.
+writes a row twice.
+
+**Connections through a load balancer, firewall or VPN.** A middlebox that drops TCP sessions it sees as
+idle (the one in front of 172.16.10.58 does so in under a minute) leaves pooled connections dead without
+either end noticing; the first use then fails with "Exception while reading from stream" or "An existing
+connection was forcibly closed". Every connection O2P opens, to Oracle, to PostgreSQL and to the metadata
+database, therefore:
+
+- sends TCP keepalive probes after 20 s of silence, then every 5 s, which also covers a COPY or a long read
+  that goes quiet;
+- PostgreSQL: sends Npgsql's keepalive every 20 s while idle, and drops a pooled connection unused for
+  30 s instead of Npgsql's default 300 s;
+- Oracle: checks a pooled session with a round trip before handing it out (`Validate Connection`), and
+  keeps no idle sessions open (`Min Pool Size=0`); a connection cut mid-open (ORA-03113, ORA-12537, ...)
+  is retried.
+
+The settings live in `PostgresConnectionSettings` and `OracleConnectionSettings`. For the metadata database,
+values already in the connection string win (e.g. `Keepalive=10;Connection Idle Lifetime=15`).
 
 If your LOBs are mostly larger than 256 KB, raise `InitialLobFetchSize` (for example to 1048576). Each LOB
 column then reserves that much per row in the fetch buffer, so fewer rows travel per round trip; the buffer

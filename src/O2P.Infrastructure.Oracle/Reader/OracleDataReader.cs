@@ -78,14 +78,8 @@ namespace O2P.Infrastructure.Oracle.Reader
                 ConnectionTimeout = 60
             };
 
-            using var conn = new OracleConnection(csb.ConnectionString)
-            {
-                // TCP keepalive (probe after 30 s idle, then every 10 s) so a VPN or firewall does not silently
-                // drop the session while the writer holds the reader back.
-                KeepAlive = true,
-                KeepAliveTime = 30,
-                KeepAliveInterval = 10
-            };
+            // Keepalive and pooled-session validation: see OracleConnectionSettings.
+            using var conn = OracleConnectionSettings.Create(csb);
             await OracleConnectionRetry.OpenWithRetryAsync(conn, cancellationToken);
 
             var includedColumns = columns.Where(c => !c.IsExcluded).ToList();

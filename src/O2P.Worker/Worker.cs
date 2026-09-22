@@ -722,7 +722,9 @@ RETURNING c.""Id"";";
             }
             catch
             {
-                await tx.RollbackAsync(cancellationToken);
+                // Best effort. If the failure broke the connection, the rollback throws too, and thrown from
+                // here it would replace the real error with "connection is broken" / ObjectDisposedException.
+                try { await tx.RollbackAsync(CancellationToken.None); } catch { /* keep the original */ }
                 throw;
             }
             finally

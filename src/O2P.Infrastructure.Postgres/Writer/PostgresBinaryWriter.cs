@@ -38,16 +38,15 @@ namespace O2P.Infrastructure.Postgres.Writer
                 Username = connection.Username,
                 Password = password,
                 Pooling = true,
-                MinPoolSize = 1,
+                // No connection kept open with nothing to do: idle ones are what a balancer cuts.
+                MinPoolSize = 0,
                 MaxPoolSize = 100,
                 Timeout = 60,
-                CommandTimeout = 600,
-                // Keepalive every 30 s so a VPN or firewall does not silently drop a connection that sits
-                // idle while the reader waits on Oracle.
-                KeepAlive = 30
+                CommandTimeout = 600
             };
 
-            await using var conn = new NpgsqlConnection(csb.ConnectionString);
+            // Keepalives and a short pooled idle lifetime: see PostgresConnectionSettings.
+            await using var conn = new NpgsqlConnection(PostgresConnectionSettings.Harden(csb).ConnectionString);
             await conn.OpenAsync(cancellationToken);
 
             var qualifiedTable = SqlIdentifier.QuotePostgresQualified(targetSchema, targetTable);

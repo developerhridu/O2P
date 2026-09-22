@@ -28,7 +28,7 @@ namespace O2P.Infrastructure.Oracle.ChangeTracking
                 ConnectionTimeout = 60
             };
 
-            var conn = new OracleConnection(csb.ConnectionString);
+            var conn = OracleConnectionSettings.Create(csb);
             try
             {
                 await OracleConnectionRetry.OpenWithRetryAsync(conn, ct);

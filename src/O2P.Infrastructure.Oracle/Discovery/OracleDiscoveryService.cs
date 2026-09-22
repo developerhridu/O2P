@@ -75,7 +75,7 @@ namespace O2P.Infrastructure.Oracle.Discovery
 
             var results = new List<DiscoveryCache>();
 
-            using var conn = new OracleConnection(csb.ConnectionString);
+            using var conn = OracleConnectionSettings.Create(csb);
             await conn.OpenAsync(cancellationToken);
 
             // Pick where table sizes come from. There is NO ALL_SEGMENTS view in Oracle - only
@@ -214,7 +214,7 @@ namespace O2P.Infrastructure.Oracle.Discovery
             var ownerUpper = owner.ToUpperInvariant();
             var tableUpper = tableName.ToUpperInvariant();
 
-            using var conn = new OracleConnection(BuildConnectionString(connection, password).ConnectionString);
+            using var conn = OracleConnectionSettings.Create(BuildConnectionString(connection, password));
             await conn.OpenAsync(cancellationToken);
 
             var sizeSource = await ResolveSizeSourceAsync(conn, connection, ownerUpper, cancellationToken);
@@ -383,7 +383,7 @@ namespace O2P.Infrastructure.Oracle.Discovery
             }
 
             var csb = BuildConnectionString(connection, password);
-            using var conn = new OracleConnection(csb.ConnectionString);
+            using var conn = OracleConnectionSettings.Create(csb);
             await conn.OpenAsync(cancellationToken);
 
             // ORACLE_MAINTAINED needs 12.1+; on 11g the column does not exist (ORA-00904). Probe first,

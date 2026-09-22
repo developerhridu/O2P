@@ -44,9 +44,14 @@ namespace O2P.Infrastructure.Oracle
                     case 18:
                     case 12535:
                     case 12170:
+                    case 3113:  // end-of-file on communication channel: a session cut by a balancer/VPN
+                    case 3114:  // not connected
                     case 3135:
                     case 1089:
+                    case 12537: // TNS connection closed
                     case 12541:
+                    case 12547: // TNS lost contact
+                    case 12560: // TNS protocol adapter error
                     case 12571:
                     case 50000:
                         return true;

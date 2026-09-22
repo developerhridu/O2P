@@ -21,7 +21,7 @@ namespace O2P.Infrastructure.Postgres.Validation
                 Pooling = true
             };
 
-            using var pgConn = new NpgsqlConnection(pgCsb.ConnectionString);
+            using var pgConn = new NpgsqlConnection(PostgresConnectionSettings.Harden(pgCsb).ConnectionString);
             await pgConn.OpenAsync(cancellationToken);
 
             // Target tables are created with quoted, case-preserving identifiers, so the count must
