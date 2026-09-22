@@ -103,6 +103,8 @@ namespace O2P.Api.Controllers
             if (conn == null) return NotFound();
 
             _db.Connections.Remove(conn);
+            // Saved Dashboard counts have no foreign key (see TableRowCount); remove them with the database.
+            _db.TableRowCounts.RemoveRange(_db.TableRowCounts.Where(c => c.ConnectionId == id));
             await _db.SaveChangesAsync();
             return NoContent();
         }

@@ -610,3 +610,96 @@ export async function unlockUser(id: string) {
   if (!res.ok) throw new Error(data.message || 'Could not unlock the user.');
   return data;
 }
+
+// ---- Dashboard ------------------------------------------------------------------------------
+
+export type DashboardSummary = {
+  runsInProgress: number;
+  copiedRows24h: number;
+  copiedBytes24h: number;
+  rowsPerSecond: number;
+  mbPerSecond: number;
+  lastRun: {
+    id: number;
+    status: string;
+    kind: string;
+    application: string;
+    createdAt: string;
+    startedAt: string | null;
+    completedAt: string | null;
+  } | null;
+};
+
+export async function fetchDashboardSummary(): Promise<DashboardSummary> {
+  const res = await apiFetch(`${API_BASE}/dashboard/summary`, { headers: getHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, 'Could not load the dashboard.'));
+  return res.json();
+}
+
+export type TableCount = {
+  table: string;
+  rows: number | null;
+  countedAt: string | null;
+  durationMs: number | null;
+  error: string | null;
+};
+
+export type PairStatus = 'match' | 'missing_rows' | 'extra_rows' | 'only_source' | 'only_destination' | 'not_counted' | 'error';
+
+export type TablePair = {
+  key: string;
+  source: TableCount | null;
+  destination: TableCount | null;
+  difference: number | null;
+  status: PairStatus;
+};
+
+export type RowCountSide = { tables: number; listedAt: string | null; countedAt: string | null };
+
+export type RowCountComparison = {
+  source: RowCountSide;
+  destination: RowCountSide;
+  pairs: TablePair[];
+};
+
+/** Saved counts of both schemas, paired by table name. Reads neither database. */
+export async function fetchRowCountComparison(
+  sourceConnectionId: number, sourceSchema: string, targetConnectionId: number, targetSchema: string
+): Promise<RowCountComparison> {
+  const q = new URLSearchParams({
+    sourceConnectionId: String(sourceConnectionId),
+    sourceSchema,
+    targetConnectionId: String(targetConnectionId),
+    targetSchema,
+  });
+  const res = await apiFetch(`${API_BASE}/row-counts?${q}`, { headers: getHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, 'Could not load the row counts.'));
+  return res.json();
+}
+
+/** Schemas with saved counts for a database: what a Viewer can pick from. */
+export async function fetchSavedCountSchemas(connectionId: number): Promise<string[]> {
+  const res = await apiFetch(`${API_BASE}/row-counts/schemas?connectionId=${connectionId}`, { headers: getHeaders() });
+  if (!res.ok) return [];
+  return (await res.json()).schemas ?? [];
+}
+
+/** Reads the schema's current table list from the database and saves it. */
+export async function refreshCountTables(connectionId: number, schema: string, signal?: AbortSignal): Promise<string[]> {
+  const res = await apiFetch(
+    `${API_BASE}/connections/${connectionId}/row-counts/tables?schema=${encodeURIComponent(schema)}`,
+    { method: 'POST', headers: getHeaders(), signal }
+  );
+  if (!res.ok) throw new Error(await readErrorMessage(res, `Could not read the tables of ${schema}.`));
+  return (await res.json()).tables ?? [];
+}
+
+/** Exact count of one table, saved. A failed count comes back with `error` set, not as an exception. */
+export async function countTable(connectionId: number, schema: string, table: string, signal?: AbortSignal): Promise<TableCount> {
+  const res = await apiFetch(
+    `${API_BASE}/connections/${connectionId}/row-counts/count?schema=${encodeURIComponent(schema)}&table=${encodeURIComponent(table)}`,
+    { method: 'POST', headers: getHeaders(), signal }
+  );
+  if (!res.ok) throw new Error(await readErrorMessage(res, `Could not count ${table}.`));
+  return res.json();
+}

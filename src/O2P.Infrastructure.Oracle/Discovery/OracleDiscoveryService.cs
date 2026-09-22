@@ -428,6 +428,38 @@ ORDER BY t.owner";
             return new SourceSchemaList(schemas, skipped);
         }
 
+        public async Task<IReadOnlyList<string>> ListTableNamesAsync(Connection connection, string password, string owner, CancellationToken cancellationToken)
+        {
+            if (connection.Host.Equals("mock", StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { "CUSTOMERS", "ORDERS" };
+            }
+
+            using var conn = OracleConnectionSettings.Create(BuildConnectionString(connection, password));
+            await conn.OpenAsync(cancellationToken);
+
+            using var cmd = conn.CreateCommand();
+            cmd.BindByName = true;
+            cmd.CommandText = @"
+SELECT t.table_name
+FROM all_tables t
+WHERE t.owner = :owner
+  AND t.nested = 'NO'
+  AND (t.iot_type IS NULL OR t.iot_type = 'IOT')
+  AND t.dropped = 'NO'
+  AND t.temporary = 'N'
+ORDER BY t.table_name";
+            cmd.Parameters.Add(new OracleParameter("owner", owner.ToUpperInvariant()));
+
+            var names = new List<string>();
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                names.Add(reader.GetString(0));
+            }
+            return names;
+        }
+
         private static OracleConnectionStringBuilder BuildConnectionString(Connection connection, string password) => new()
         {
             DataSource = $"{connection.Host}:{connection.Port}/{connection.ServiceOrDb}",

@@ -129,7 +129,7 @@ Tick every box before opening the UI.
 | `This account is temporarily locked due to repeated failed sign-in attempts.` | 5 failed attempts → locked for 15 minutes | Wait, or ask an Admin to click **Unlock** on the Users page |
 | `Cannot reach the API. Check that O2P.Api is running and try again.` | API is down, or the UI cannot reach it | Tell your administrator |
 
-Your session lasts **20 minutes**. There is no refresh; when it expires you are sent back to the sign-in page and must sign in again. Do this before starting long editing sessions, such as a large table selection.
+Your session lasts **7 days** in this browser. There is no refresh: when it expires you are sent back to the sign-in page and must sign in again. It ends early if an administrator resets your password or deactivates you, or when you change your password or sign out.
 
 ### 3.2 Update Password (forced on first login)
 
@@ -172,7 +172,7 @@ You can change your password any time from the sidebar: **Change Password**.
 
 | Menu item | Use it for |
 |---|---|
-| **Dashboard** | A static landing page. The tiles (*Active Jobs*, *Total Migrated (GB)*, *Global Throughput*) always show zero — **do not use it to monitor migrations.** Use **Runs** instead. |
+| **Dashboard** | Runs in progress, data copied in the last 24 hours, current speed and the last run; below them, the **row count comparison** of a source and a destination schema (see [11.3](#113-compare-whole-schemas-on-the-dashboard)). |
 | **Databases** | Oracle source and PostgreSQL target profiles |
 | **Migrations** | Groups connections, table selections and jobs for one system. **This is where you build table selections and launch jobs.** |
 | **Runs** | List of every migration job, refreshed every 5 seconds |
@@ -686,6 +686,38 @@ Suggested sign-off list:
 
 > The leftover table `_o2p_chunk_log` in the target schema is O2P's bookkeeping for duplicate-safe batch loads. Keep it until you are done re-running; drop it afterwards if you like.
 
+### 11.3 Compare whole schemas on the Dashboard
+
+The **Row count comparison** on the Dashboard counts every table in two schemas exactly and puts them side by side. Unlike the check in 11.1 it does not depend on a run: it covers every table, including ones no migration touched.
+
+1. Under **Source**, pick the Oracle database and schema. Under **Destination**, pick the PostgreSQL database and schema. The page remembers your choice in this browser.
+2. Press **Sync Source**. O2P reads the schema's current list of tables, then counts each table with an exact `COUNT(*)`, one at a time. The line beside the button shows which table it is on (`Counting 12 of 140: ORDERS`).
+3. Press **Sync Destination** to do the same on PostgreSQL. The two syncs can run at the same time.
+
+Tables are paired by name, ignoring case, so Oracle's `ORDERS` pairs with PostgreSQL's `orders`. If the destination has both `ORDERS` and `orders`, the exact-case match wins. A table O2P gave a suffix (such as `orders_1`) shows up as two unpaired tables.
+
+| Status | Meaning |
+|---|---|
+| **Match** | Same number of rows on both sides |
+| **Missing rows** | The destination has fewer rows. *Difference* shows how many, e.g. `−15` |
+| **Extra rows** | The destination has more rows |
+| **Only in source** / **Only in destination** | No table with that name on the other side |
+| **Not counted** | One side has not been counted yet |
+| **Error** | The last count failed; hover over the message under the number to read it all. The previous number is kept |
+
+- **Counts are saved.** The page opens with the last counts. Under each number it says when it was taken; hover over that text to see the exact time and how long the count took.
+- **Refresh one table:** use the ⟳ next to its number.
+- **Stop** cancels the count that is running in the database. Tables already counted keep their new numbers.
+- **Filters:** *Differences*, *Only one side* and *Not counted* narrow the list. The search box finds a table by name.
+- **Difference in paired tables** adds up only tables that exist and are counted on both sides.
+- **Whole tables are counted**, ignoring any row filter a migration uses, so a filtered table shows *Missing rows* even after a perfect copy.
+- **Large tables over a VPN** can take minutes each. Counting reads every row, so avoid it on a busy production source during peak hours.
+- **Tables left out:**
+  - Oracle tables in the recycle bin and temporary tables;
+  - PostgreSQL partitions: the partitioned table is counted once, and that count includes them;
+  - O2P's `_o2p_chunk_log`.
+- **Who can do what:** Admins and Operators can sync. Viewers see the saved counts, and can pick only schemas someone has already synced.
+
 ---
 
 ## 12. Step 8 — Fix problems and re-run
@@ -745,7 +777,7 @@ Goal: copy Oracle schema `HR` to PostgreSQL schema `hr_target` in database `TARG
 | Login | `Invalid credentials` | Wrong password, or more than 5 attempts in 5 minutes → retype / wait |
 | Login | `…temporarily locked…` | 5 failed attempts → wait 15 minutes or an Admin clicks **Unlock** |
 | Login | `Cannot reach the API…` | API stopped or wrong address → call your administrator |
-| Any page | Suddenly back at Sign in | 20-minute session expired → sign in again |
+| Any page | Suddenly back at Sign in | 7-day session expired, or your password was changed or reset → sign in again |
 | Connections | **Failed** + `Connection failed: …` | Wrong host/port/service/credentials, firewall, or listener down; the host must be reachable from the *API/Worker* server, not your PC |
 | Connections | `A connection profile named "…" already exists…` | Pick a different **Profile Name** |
 | Connections | `…Admin role required` | Only Admin can create/edit/delete connections |

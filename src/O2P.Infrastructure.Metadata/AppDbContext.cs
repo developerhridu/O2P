@@ -36,6 +36,7 @@ namespace O2P.Infrastructure.Metadata
         public DbSet<WorkerControl> WorkerControls { get; set; } = null!;
         public DbSet<WorkerHeartbeat> WorkerHeartbeats { get; set; } = null!;
         public DbSet<TrackedTable> TrackedTables { get; set; } = null!;
+        public DbSet<TableRowCount> TableRowCounts { get; set; } = null!;
 
         protected override void OnModelCreating(ModelBuilder builder)
         {
@@ -249,6 +250,17 @@ namespace O2P.Infrastructure.Metadata
                 b.HasIndex(e => new { e.TargetConnectionId, e.TargetSchema, e.TargetTableName }).IsUnique();
                 b.HasIndex(e => new { e.SourceConnectionId, e.SourceOwner, e.SourceTable });
                 // No relationships, on purpose - see TrackedTable.
+            });
+
+            builder.Entity<TableRowCount>(b =>
+            {
+                b.ToTable("table_row_counts");
+                b.HasKey(e => e.Id);
+                b.Property(e => e.Id).UseIdentityAlwaysColumn();
+                b.Property(e => e.SchemaName).IsRequired();
+                b.Property(e => e.TableName).IsRequired();
+                b.HasIndex(e => new { e.ConnectionId, e.SchemaName, e.TableName }).IsUnique();
+                // No relationship, on purpose - see TableRowCount.
             });
 
             builder.Entity<TypeMappingRule>(b =>

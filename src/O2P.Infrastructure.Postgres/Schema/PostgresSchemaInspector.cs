@@ -113,6 +113,39 @@ ORDER BY n.nspname;";
             return schemas;
         }
 
+        public async Task<IReadOnlyList<string>> ListTableNamesAsync(
+            Connection connection,
+            string password,
+            string schema,
+            CancellationToken cancellationToken)
+        {
+            if (PostgresConnectionFactory.IsMock(connection))
+            {
+                return new[] { "customers", "orders" };
+            }
+
+            await using var conn = await PostgresConnectionFactory.OpenAsync(connection, password, cancellationToken);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+SELECT c.relname
+FROM pg_class     c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = @schema
+  AND c.relkind IN ('r', 'p')
+  AND NOT c.relispartition
+  AND c.relname <> '_o2p_chunk_log'
+ORDER BY c.relname;";
+            cmd.Parameters.AddWithValue("schema", schema);
+
+            var names = new List<string>();
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                names.Add(reader.GetString(0));
+            }
+            return names;
+        }
+
         public async Task<IReadOnlyCollection<string>> GetExistingTableNamesAsync(
             Connection connection,
             string password,

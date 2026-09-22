@@ -952,6 +952,48 @@ namespace O2P.Infrastructure.Metadata.Migrations
                     b.ToTable("run_logs", "o2p");
                 });
 
+            modelBuilder.Entity("O2P.Domain.Entities.TableRowCount", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityAlwaysColumn(b.Property<long>("Id"));
+
+                    b.Property<long>("ConnectionId")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTimeOffset?>("CountedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<long?>("DurationMs")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("Error")
+                        .HasColumnType("text");
+
+                    b.Property<DateTimeOffset>("ListedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<long?>("Rows")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("SchemaName")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("TableName")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ConnectionId", "SchemaName", "TableName")
+                        .IsUnique();
+
+                    b.ToTable("table_row_counts", "o2p");
+                });
+
             modelBuilder.Entity("O2P.Domain.Entities.TableRun", b =>
                 {
                     b.Property<long>("Id")
