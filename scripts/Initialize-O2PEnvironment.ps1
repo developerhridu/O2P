@@ -58,7 +58,7 @@ function Initialize-O2PEnvironment {
         [Environment]::SetEnvironmentVariable("JwtSettings__Audience", $settings.JwtSettings.Audience)
     }
     if (-not [Environment]::GetEnvironmentVariable("JwtSettings__ExpiryMinutes")) {
-        [Environment]::SetEnvironmentVariable("JwtSettings__ExpiryMinutes", "20")
+        [Environment]::SetEnvironmentVariable("JwtSettings__ExpiryMinutes", "10080")
     }
 
     if (-not [Environment]::GetEnvironmentVariable("BootstrapAdmin__Username")) {

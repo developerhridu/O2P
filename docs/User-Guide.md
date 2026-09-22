@@ -322,7 +322,7 @@ ASP.NET Core environment variables use double underscores in place of JSON nesti
 | `JwtSettings__Secret` | Yes | Repository defaults are development placeholders and must be overridden |
 | `JwtSettings__Issuer` | Yes | Loaded from API settings |
 | `JwtSettings__Audience` | Yes | Loaded from API settings |
-| `JwtSettings__ExpiryMinutes` | No | `20` minutes in current settings |
+| `JwtSettings__ExpiryMinutes` | No | `10080` (7 days) in current settings |
 | `BootstrapAdmin__Username` | No | `admin` |
 | `BootstrapAdmin__Email` | No | local internal address in settings |
 | `BootstrapAdmin__Password` | Operationally required | If blank, code uses an insecure fallback and forces password change |
@@ -1020,7 +1020,7 @@ Planning and reading retry selected transient Oracle errors up to four attempts 
 ### Authentication failure or account lock
 
 - **Symptom:** `Invalid credentials`, disabled-account message, HTTP 423, or UI returns to login.
-- **Cause:** Wrong password, inactive account, five failed sign-ins, expired 20-minute token, password reset, or changed security stamp.
+- **Cause:** Wrong password, inactive account, five failed sign-ins, expired 7-day token, password reset, or changed security stamp.
 - **Diagnose:** Ask an administrator to inspect the Users page and API logs.
 - **Solution:** use the correct credential, unlock/reactivate the account, or reset the password. Lockout duration defaults to 15 minutes.
 
