@@ -158,7 +158,7 @@ export default function JobRuns() {
                       <span className="run-kind" data-kind={job.kind}>{runKindLabel(job.kind)}</span>
                     </h4>
                     <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                      Migration: {job.application?.name} • Destination schema: {job.targetSchema}
+                      {job.application ? `Migration: ${job.application.name}` : `Dashboard: ${job.sourceConnectionName ?? 'Source'} ? ${job.targetConnectionName ?? 'Destination'}`} • Destination schema: {job.targetSchema}
                     </span>
                   </div>
                 </div>

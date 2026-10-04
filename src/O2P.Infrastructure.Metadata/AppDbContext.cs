@@ -121,8 +121,8 @@ namespace O2P.Infrastructure.Metadata
                 b.ToTable("job_runs");
                 b.HasKey(e => e.Id);
                 b.Property(e => e.Id).UseIdentityAlwaysColumn();
-                b.HasOne(e => e.Application).WithMany().HasForeignKey(e => e.ApplicationId);
-                b.HasOne(e => e.Manifest).WithMany().HasForeignKey(e => e.ManifestId);
+                b.HasOne(e => e.Application).WithMany().HasForeignKey(e => e.ApplicationId).OnDelete(DeleteBehavior.Cascade);
+                b.HasOne(e => e.Manifest).WithMany().HasForeignKey(e => e.ManifestId).OnDelete(DeleteBehavior.Cascade);
                 b.HasIndex(e => e.Status);
                 b.Property(e => e.Kind).HasDefaultValue(JobRunKind.Bulk);
             });
@@ -137,7 +137,7 @@ namespace O2P.Infrastructure.Metadata
                 b.Property(e => e.SourceKeyJson).HasColumnType("jsonb");
                 b.Property(e => e.SourceStartScn).HasColumnType("numeric");
                 b.HasOne(e => e.JobRun).WithMany(j => j.TableRuns).HasForeignKey(e => e.JobRunId);
-                b.HasOne(e => e.ManifestTable).WithMany().HasForeignKey(e => e.ManifestTableId);
+                b.HasOne(e => e.ManifestTable).WithMany().HasForeignKey(e => e.ManifestTableId).OnDelete(DeleteBehavior.Cascade);
                 b.HasIndex(e => e.Status);
                 b.HasIndex(e => new { e.JobRunId, e.TargetTableName }).IsUnique();
             });

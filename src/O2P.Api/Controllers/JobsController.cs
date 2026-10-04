@@ -286,6 +286,8 @@ namespace O2P.Api.Controllers
                 if (cancelled > 0)
                 {
                     cancelledHere = true;
+                    await _db.TrackedTables.Where(t => t.ActiveJobRunId == id)
+                        .ExecuteUpdateAsync(s => s.SetProperty(t => t.ActiveJobRunId, (long?)null));
                     await _db.TableRuns
                         .Where(t => t.JobRunId == id && (t.Status == "Pending"))
                         .ExecuteUpdateAsync(s => s
@@ -443,6 +445,7 @@ namespace O2P.Api.Controllers
                 .FirstOrDefaultAsync(j => j.Id == id);
 
             if (job == null) return NotFound();
+            if (JobRunKind.IsChanges(job.Kind)) return BadRequest("Use Check readiness beside the table on Dashboard.");
 
             var sourceConnId = job.Application.Connections.First(c => c.Slot == job.SourceSlot).ConnectionId;
             var targetConnId = job.Application.Connections.First(c => c.Slot == job.TargetSlot).ConnectionId;

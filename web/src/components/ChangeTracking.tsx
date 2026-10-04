@@ -1,106 +1,15 @@
-import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
-import { CheckCircle2, Copy, History, ListChecks, RefreshCw, XCircle } from 'lucide-react';
-import { checkChangeReadiness, fetchTrackedTables, type ChangeReadiness, type TrackedTable } from '../api';
-import { SLOTS, trackingLabel } from '../labels';
+import { useState } from 'react';
+import { CheckCircle2, Copy, ListChecks, RefreshCw, XCircle } from 'lucide-react';
+import { checkChangeReadiness, checkTableReadiness, type ReadinessTable, type ChangeReadiness } from '../api';
+import { SLOTS } from '../labels';
 import './ChangeTracking.css';
 
-/**
- * The tables of this migration that "Copy changes" keeps up to date, and where each one stands.
- * Refreshes when `refreshKey` changes, so the page can ask for a reload after starting a copy.
- */
-export function TrackedTablesPanel({ appId, refreshKey }: { appId: number; refreshKey: number }) {
-  const [tables, setTables] = useState<TrackedTable[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let alive = true;
-    fetchTrackedTables(appId)
-      .then((t) => { if (alive) { setTables(t); setError(null); } })
-      .catch((e) => { if (alive) setError(e.message); });
-    return () => { alive = false; };
-  }, [appId, refreshKey]);
-
-  return (
-    <section className="card p-0 overflow-hidden" aria-labelledby="tracked-heading">
-      <div className="flex items-center gap-3 border-b border-slate-800 bg-slate-950/40 p-5">
-        <span className="rounded-lg bg-emerald-500/10 p-2 text-emerald-300">
-          <History size={20} />
-        </span>
-        <div>
-          <h2 id="tracked-heading" className="m-0 text-xl font-semibold">Change tracking</h2>
-          <p className="m-0 text-sm text-slate-400">
-            After a bulk copy, <strong>Copy changes</strong> brings these tables up to date with the source: new rows added,
-            changed rows updated, deleted rows deleted. Nothing is emptied or recreated.
-          </p>
-        </div>
-      </div>
-
-      <div className="p-5">
-        {error && <p className="m-0 text-sm text-rose-300">{error}</p>}
-        {!error && tables === null && <p className="m-0 text-sm text-slate-400">Loading…</p>}
-        {!error && tables?.length === 0 && (
-          <p className="m-0 text-sm text-slate-400">
-            No table is tracked yet. Run a bulk copy of a table selection; each table with a primary key is then set up
-            for change tracking automatically, if the source is ready for it (<strong>Check change tracking</strong> says).
-          </p>
-        )}
-        {!error && tables && tables.length > 0 && (
-          <div className="overflow-x-auto">
-            <table className="ct-table" data-testid="tracked-tables">
-              <thead>
-                <tr>
-                  <th>Source table</th>
-                  <th>Destination</th>
-                  <th>Status</th>
-                  <th>Last copied</th>
-                  <th>Notes</th>
-                </tr>
-              </thead>
-              <tbody>
-                {tables.map((t) => {
-                  const status = trackingLabel(t.status);
-                  return (
-                    <tr key={t.id} data-table={t.targetTableName}>
-                      <td className="font-mono">{t.sourceOwner}.{t.sourceTable}</td>
-                      <td className="font-mono">{t.targetSchema}.{t.targetTableName}</td>
-                      <td>
-                        <span className="ct-status" style={{ color: status.color }} title={status.hint}>{status.label}</span>
-                        {t.activeJobRunId != null && (
-                          <div className="text-xs text-slate-400">
-                            Copying now in <Link to={`/jobs/${t.activeJobRunId}`}>run #{t.activeJobRunId}</Link>
-                          </div>
-                        )}
-                      </td>
-                      <td className="whitespace-nowrap">{t.lastSyncedAt ? new Date(t.lastSyncedAt).toLocaleString() : 'Not yet'}</td>
-                      <td className="text-sm">
-                        {t.lastError && <div className="text-rose-300">{t.lastError}</div>}
-                        {t.heldBackBy && t.heldBackBy.length > 0 && (
-                          <div className="text-amber-200" title="These Oracle transactions were still open, so the next copy looks at their rows again once they commit.">
-                            Held back by {t.heldBackBy.length} open Oracle transaction{t.heldBackBy.length > 1 ? 's' : ''}
-                            {t.heldBackBy[0].username ? ` (${[t.heldBackBy[0].username, t.heldBackBy[0].program].filter(Boolean).join(', ')}${t.heldBackBy.length > 1 ? ', …' : ''})` : ''}
-                          </div>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-        <p className="m-0 mt-4 text-xs text-slate-500">
-          Not carried across: new columns added in the source, and anything written to the source without logging.
-          Keep the source's archived logs for longer than the gap between presses, or the history in between is lost and
-          a bulk copy is needed again.
-        </p>
-      </div>
-    </section>
-  );
-}
-
 /** Read-only check of the source, with the SQL a DBA would run for anything missing. */
-export function ReadinessDialog({ appId, manifest, onClose }: { appId: number; manifest: any; onClose: () => void }) {
+type ReadinessProps = { onClose: () => void } & (
+  { appId: number; manifest: any; table?: never } |
+  { appId?: never; manifest?: never; table: ReadinessTable }
+);
+export function ReadinessDialog({ appId, manifest, table, onClose }: ReadinessProps) {
   const [sourceSlot, setSourceSlot] = useState('oracle_test');
   const [result, setResult] = useState<ChangeReadiness | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -112,7 +21,7 @@ export function ReadinessDialog({ appId, manifest, onClose }: { appId: number; m
     setError(null);
     setResult(null);
     try {
-      setResult(await checkChangeReadiness(appId, sourceSlot, manifest.id));
+      setResult(table ? await checkTableReadiness(table) : await checkChangeReadiness(appId!, sourceSlot, manifest.id));
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -134,25 +43,26 @@ export function ReadinessDialog({ appId, manifest, onClose }: { appId: number; m
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
-      <div className="card w-full max-w-3xl max-h-[90vh] overflow-y-auto" role="dialog" aria-labelledby="readiness-title">
+      <div className="card w-full max-w-3xl max-h-[90vh] overflow-y-auto" role="dialog" aria-modal="true" aria-labelledby="readiness-title">
         <h3 id="readiness-title" className="m-0 flex items-center gap-2 text-xl font-semibold">
           <ListChecks size={20} className="text-sky-300" />
           Check change tracking
         </h3>
         <p className="mt-2 text-sm text-slate-400">
-          Looks at the source database for everything <strong>Copy changes</strong> needs, for the ticked tables of
-          “{manifest.name || `Table selection v${manifest.version}`}”. It only reads; it changes nothing.
+          Checks what Copy changes needs for {table ? `${table.sourceOwner}.${table.sourceTable}` :
+            `the selected tables in ${manifest.name || `Table selection v${manifest.version}`}`}.
+          This check only reads the source; it changes nothing.
         </p>
 
         <div className="mt-4 flex flex-wrap items-end gap-3">
-          <div>
+          {!table && <div>
             <label className="label" htmlFor="readiness-source">Source</label>
             <select id="readiness-source" className="input" value={sourceSlot} onChange={(e) => setSourceSlot(e.target.value)}>
               {SLOTS.filter((s) => s.kind === 0).map((s) => (
                 <option key={s.key} value={s.key}>{s.label}</option>
               ))}
             </select>
-          </div>
+          </div>}
           <button className="btn" onClick={run} disabled={checking}>
             {checking ? <RefreshCw size={16} className="spin" /> : <ListChecks size={16} />}
             {checking ? 'Checking…' : 'Check'}

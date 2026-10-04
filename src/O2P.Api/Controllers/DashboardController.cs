@@ -50,7 +50,7 @@ namespace O2P.Api.Controllers
                     j.Id,
                     j.Status,
                     j.Kind,
-                    application = j.Application.Name,
+                    application = j.ApplicationId == null ? "Dashboard change copy" : j.Application.Name,
                     j.CreatedAt,
                     j.StartedAt,
                     j.CompletedAt

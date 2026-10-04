@@ -102,7 +102,11 @@ namespace O2P.Api.Controllers
             var conn = await _db.Connections.FindAsync(id);
             if (conn == null) return NotFound();
 
+            if (await _db.JobRuns.AnyAsync(j => (j.SourceConnectionId == id || j.TargetConnectionId == id)
+                && (j.Status == "Queued" || j.Status == "Running" || j.Status == "Paused")))
+                return Conflict("This database has an active change copy. Cancel it or wait for it to finish first.");
             _db.Connections.Remove(conn);
+            _db.TrackedTables.RemoveRange(_db.TrackedTables.Where(t => t.SourceConnectionId == id || t.TargetConnectionId == id));
             // Saved Dashboard counts have no foreign key (see TableRowCount); remove them with the database.
             _db.TableRowCounts.RemoveRange(_db.TableRowCounts.Where(c => c.ConnectionId == id));
             await _db.SaveChangesAsync();

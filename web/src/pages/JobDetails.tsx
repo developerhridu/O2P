@@ -160,7 +160,7 @@ export default function JobDetails() {
             <h1 className="text-gradient" style={{ margin: 0 }}>Run #{jobId}</h1>
             <p style={{ margin: '4px 0 0 0', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
               <span className="run-kind" data-kind={job.kind}>{runKindLabel(job.kind)}</span>{' '}
-              Migration: <strong>{job.application?.name}</strong> • Destination schema: <strong>{job.targetSchema}</strong>
+              {job.application ? <>Migration: <strong>{job.application.name}</strong></> : <>Dashboard: <strong>{job.sourceConnectionName} ? {job.targetConnectionName}</strong></>} • Destination schema: <strong>{job.targetSchema}</strong>
             </p>
             {isChanges && (
               <p style={{ margin: '6px 0 0 0', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
@@ -354,7 +354,7 @@ export default function JobDetails() {
                       {isExpanded ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
                     </button>
                     <div>
-                      <h4 style={{ margin: 0, fontSize: '1.05rem' }}>{t.manifestTable?.tableName}</h4>
+                      <h4 style={{ margin: 0, fontSize: '1.05rem' }}>{t.sourceTable ?? t.manifestTable?.tableName ?? t.targetTableName}</h4>
                       <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
                         Destination: <span style={{ fontFamily: 'monospace' }}>{t.targetTableName}</span>
                         {t.targetTablePreExisted != null && (

@@ -225,8 +225,8 @@ RETURNING j.""Id"";";
             var secretProtector = scope.ServiceProvider.GetRequiredService<ISecretProtector>();
 
             var job = await db.JobRuns.Include(j => j.Application).ThenInclude(a => a.Connections).FirstAsync(j => j.Id == jobId, stoppingToken);
-            var sourceId = job.Application.Connections.FirstOrDefault(c => c.Slot == job.SourceSlot)?.ConnectionId;
-            var targetId = job.Application.Connections.FirstOrDefault(c => c.Slot == job.TargetSlot)?.ConnectionId;
+            var sourceId = job.SourceConnectionId ?? job.Application?.Connections.FirstOrDefault(c => c.Slot == job.SourceSlot)?.ConnectionId;
+            var targetId = job.TargetConnectionId ?? job.Application?.Connections.FirstOrDefault(c => c.Slot == job.TargetSlot)?.ConnectionId;
             var source = sourceId == null ? null : await db.Connections.FindAsync(new object[] { sourceId.Value }, stoppingToken);
             var target = targetId == null ? null : await db.Connections.FindAsync(new object[] { targetId.Value }, stoppingToken);
             if (source == null || target == null)

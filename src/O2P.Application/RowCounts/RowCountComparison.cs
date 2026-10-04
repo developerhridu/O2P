@@ -1,14 +1,15 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using O2P.Domain.Entities;
 
 namespace O2P.Application.RowCounts
 {
     /// <summary>One table's last count on one side.</summary>
-    public sealed record TableCount(string Table, long? Rows, DateTimeOffset? CountedAt, long? DurationMs, string? Error);
+    public sealed record TableCount(string Table, long? Rows, DateTimeOffset? CountedAt, long? DurationMs, string? Error, bool Stale = false);
 
     /// <summary>A source table and the destination table it pairs with; either may be missing.</summary>
-    public sealed record TablePair(string Key, TableCount? Source, TableCount? Destination, long? Difference, string Status);
+    public sealed record TablePair(string Key, TableCount? Source, TableCount? Destination, long? Difference, string Status, long? TrackedTableId = null);
 
     public sealed record ComparisonSummary(
         int Tables,
@@ -44,6 +45,30 @@ namespace O2P.Application.RowCounts
     /// </summary>
     public static class RowCountComparison
     {
+        public static IReadOnlyList<TablePair> PairTracked(IEnumerable<TableCount> source,
+            IEnumerable<TableCount> destination, IEnumerable<TrackedTable> tracked)
+        {
+            var sources = source.ToDictionary(t => t.Table, StringComparer.Ordinal);
+            var destinations = destination.ToDictionary(t => t.Table, StringComparer.Ordinal);
+            var mappedSources = new HashSet<string>(StringComparer.Ordinal);
+            var mappedTargets = new HashSet<string>(StringComparer.Ordinal);
+            var pairs = new List<TablePair>();
+            foreach (var t in tracked)
+            {
+                var s = sources.GetValueOrDefault(t.SourceTable) ?? new TableCount(t.SourceTable, null, null, null, null);
+                var d = destinations.GetValueOrDefault(t.TargetTableName) ?? new TableCount(t.TargetTableName, null, null, null, null);
+                // A count from before a copy cannot establish agreement after that copy.
+                s = s with { Stale = t.ActiveJobRunId != null || t.UpdatedAt > s.CountedAt || t.LastSyncedAt > s.CountedAt };
+                d = d with { Stale = t.ActiveJobRunId != null || t.UpdatedAt > d.CountedAt || t.LastSyncedAt > d.CountedAt };
+                pairs.Add(Compare(s.Table, s, d) with { TrackedTableId = t.Id });
+                mappedSources.Add(s.Table);
+                mappedTargets.Add(d.Table);
+            }
+            pairs.AddRange(Pair(sources.Values.Where(s => !mappedSources.Contains(s.Table)),
+                destinations.Values.Where(d => !mappedTargets.Contains(d.Table))));
+            return pairs.OrderBy(p => p.Key, StringComparer.Ordinal).ThenBy(p => p.Destination?.Table, StringComparer.Ordinal).ToList();
+        }
+
         public static IReadOnlyList<TablePair> Pair(IEnumerable<TableCount> source, IEnumerable<TableCount> destination)
         {
             var sources = source.OrderBy(t => t.Table, StringComparer.Ordinal).ToList();
@@ -85,7 +110,7 @@ namespace O2P.Application.RowCounts
             if (source.Error != null || destination.Error != null)
                 return new TablePair(key, source, destination, null, PairStatus.Error);
 
-            if (source.Rows is not long s || destination.Rows is not long d)
+            if (source.Stale || destination.Stale || source.Rows is not long s || destination.Rows is not long d)
                 return new TablePair(key, source, destination, null, PairStatus.NotCounted);
 
             var difference = d - s;
@@ -103,7 +128,7 @@ namespace O2P.Application.RowCounts
             OnlyDestination: pairs.Count(p => p.Status == PairStatus.OnlyDestination),
             NotCounted: pairs.Count(p => p.Status == PairStatus.NotCounted),
             Errors: pairs.Count(p => p.Status == PairStatus.Error),
-            SourceRows: pairs.Sum(p => p.Source?.Rows ?? 0),
+            SourceRows: pairs.Where(p => p.Source != null).DistinctBy(p => p.Source!.Table).Sum(p => p.Source?.Rows ?? 0),
             DestinationRows: pairs.Sum(p => p.Destination?.Rows ?? 0));
     }
 }

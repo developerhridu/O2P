@@ -51,14 +51,30 @@ namespace O2P.Api.Controllers
             var source = await SavedAsync(sourceConnectionId, SourceSchemaName(sourceSchema), cancellationToken);
             var destination = await SavedAsync(targetConnectionId, targetSchema, cancellationToken);
 
-            var pairs = RowCountComparison.Pair(source.Select(ToCount), destination.Select(ToCount));
+            var owner = SourceSchemaName(sourceSchema);
+            var tracked = await _db.TrackedTables.AsNoTracking().Where(t =>
+                t.SourceConnectionId == sourceConnectionId && t.SourceOwner == owner
+                && t.TargetConnectionId == targetConnectionId && t.TargetSchema == targetSchema).ToListAsync(cancellationToken);
+            var activeIds = tracked.Where(t => t.ActiveJobRunId != null).Select(t => t.ActiveJobRunId!.Value).ToList();
+            var activeJobs = await _db.JobRuns.Where(j => activeIds.Contains(j.Id))
+                .ToDictionaryAsync(j => j.Id, j => j.Status, cancellationToken);
+            // Finished reservations can briefly remain until worker cleanup. Do not show them as busy.
+            foreach (var t in tracked)
+                if (t.ActiveJobRunId is long jobId && (!activeJobs.TryGetValue(jobId, out var status)
+                    || status is not ("Queued" or "Running" or "Paused"))) t.ActiveJobRunId = null;
+            var byId = tracked.ToDictionary(t => t.Id);
+            var pairs = RowCountComparison.PairTracked(source.Select(ToCount), destination.Select(ToCount), tracked);
 
             return Ok(new
             {
                 summary = RowCountComparison.Summarise(pairs),
                 source = SideInfo(source),
                 destination = SideInfo(destination),
-                pairs
+                pairs = pairs.Select(p => new {
+                    p.Key, p.Source, p.Destination, p.Difference, p.Status,
+                    tracking = p.TrackedTableId is long id ? TableChangeTrackingController.View(byId[id],
+                        byId[id].ActiveJobRunId is long active ? activeJobs.GetValueOrDefault(active) : null) : null
+                })
             });
         }
 
@@ -72,6 +88,8 @@ namespace O2P.Api.Controllers
             var schemas = await _db.TableRowCounts.AsNoTracking()
                 .Where(c => c.ConnectionId == connectionId)
                 .Select(c => c.SchemaName)
+                .Union(_db.TrackedTables.Where(t => t.SourceConnectionId == connectionId).Select(t => t.SourceOwner))
+                .Union(_db.TrackedTables.Where(t => t.TargetConnectionId == connectionId).Select(t => t.TargetSchema))
                 .Distinct()
                 .OrderBy(s => s)
                 .ToListAsync(cancellationToken);

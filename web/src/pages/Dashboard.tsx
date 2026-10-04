@@ -16,7 +16,11 @@ import {
   type RowCountComparison,
   type TableCount,
   type TablePair,
+  type DashboardTrackedTable,
+  type ReadinessTable,
 } from '../api';
+import { ReadinessDialog } from '../components/ChangeTracking';
+import { TableCopyDialog, TableTrackingCells } from '../components/TableChangeTracking';
 import { formatAgo, formatBytes, formatCount, formatDuration } from '../format';
 import { runKindLabel, statusColor, statusLabel } from '../labels';
 import './Dashboard.css';
@@ -52,7 +56,7 @@ function restatus(pair: TablePair): TablePair {
   if (!destination) return { ...pair, difference: null, status: 'only_source' };
   if (!source) return { ...pair, difference: null, status: 'only_destination' };
   if (source.error || destination.error) return { ...pair, difference: null, status: 'error' };
-  if (source.rows == null || destination.rows == null) return { ...pair, difference: null, status: 'not_counted' };
+  if (source.stale || destination.stale || source.rows == null || destination.rows == null) return { ...pair, difference: null, status: 'not_counted' };
   const difference = destination.rows - source.rows;
   return { ...pair, difference, status: difference === 0 ? 'match' : difference < 0 ? 'missing_rows' : 'extra_rows' };
 }
@@ -80,6 +84,13 @@ export default function Dashboard() {
   const [busyRow, setBusyRow] = useState<string | null>(null);
   const [filter, setFilter] = useState<Filter>('all');
   const [search, setSearch] = useState('');
+  const [readinessTable, setReadinessTable] = useState<ReadinessTable | null>(null);
+  const [copyTable, setCopyTable] = useState<DashboardTrackedTable | null>(null);
+  const [startedRun, setStartedRun] = useState<number | null>(null);
+  const comparisonRequest = useRef(0);
+  const choiceKey = JSON.stringify(choices);
+  const currentChoice = useRef(choiceKey);
+  currentChoice.current = choiceKey;
   const aborters = useRef<Record<Side, AbortController | null>>({ source: null, destination: null });
 
   const oracle = useMemo(() => connections.filter((c) => c.kind === 0), [connections]);
@@ -136,11 +147,18 @@ export default function Dashboard() {
 
   const choose = (side: Side, patch: Partial<Choice>) => {
     aborters.current[side]?.abort();
+    comparisonRequest.current++;
+    setComparison(null);
+    setCopyTable(null);
+    setReadinessTable(null);
+    setStartedRun(null);
     setChoices((c) => ({ ...c, [side]: { ...c[side], ...patch } }));
   };
 
   // ---- comparison -------------------------------------------------------------------------------
   const loadComparison = useCallback(async () => {
+    if (currentChoice.current !== choiceKey) return;
+    const request = ++comparisonRequest.current;
     if (!ready) {
       setComparison(null);
       return;
@@ -148,20 +166,29 @@ export default function Dashboard() {
     try {
       const data = await fetchRowCountComparison(
         choices.source.connectionId!, choices.source.schema, choices.destination.connectionId!, choices.destination.schema);
+      if (request !== comparisonRequest.current || currentChoice.current !== choiceKey) return;
       setComparison(data);
       setLoadError(null);
     } catch (err: any) {
+      if (request !== comparisonRequest.current || currentChoice.current !== choiceKey) return;
       setLoadError(err.message);
     }
-  }, [ready, choices]);
+  }, [ready, choices, choiceKey]);
 
-  useEffect(() => { loadComparison(); }, [loadComparison]);
+  useEffect(() => {
+    loadComparison();
+    const timer = setInterval(loadComparison, 5000);
+    const invalidate = () => { comparisonRequest.current++; };
+    return () => { clearInterval(timer); invalidate(); };
+  }, [loadComparison]);
 
   /** Puts one fresh count into its row, without reloading the whole comparison. */
   const applyCount = (side: Side, count: TableCount) => {
+    if (currentChoice.current !== choiceKey) return;
     setComparison((c) => {
       if (!c) return c;
-      const pairs = c.pairs.map((p) => (p[side]?.table === count.table ? restatus({ ...p, [side]: count }) : p));
+      const pairs = c.pairs.map((p) => (p[side]?.table === count.table
+        ? restatus({ ...p, [side]: { ...count, stale: !!p.tracking?.activeJobRunId } }) : p));
       return { ...c, pairs };
     });
   };
@@ -226,14 +253,14 @@ export default function Dashboard() {
   };
 
   // ---- derived ----------------------------------------------------------------------------------
-  const pairs = comparison?.pairs ?? [];
+  const pairs = useMemo(() => comparison?.pairs ?? [], [comparison]);
   const totals = useMemo(() => {
     const count = (test: (s: PairStatus) => boolean) => pairs.filter((p) => test(p.status)).length;
     return {
       tables: pairs.length,
       matching: count((s) => s === 'match'),
       comparable: count((s) => s === 'match' || s === 'missing_rows' || s === 'extra_rows'),
-      sourceRows: pairs.reduce((n, p) => n + (p.source?.rows ?? 0), 0),
+      sourceRows: [...new Map(pairs.filter(p => p.source).map(p => [p.source!.table, p.source!.rows ?? 0])).values()].reduce((n, rows) => n + rows, 0),
       destinationRows: pairs.reduce((n, p) => n + (p.destination?.rows ?? 0), 0),
       // Only tables present and counted on both sides: a table that exists on one side only would
       // otherwise swamp the figure with rows that were never meant to be compared.
@@ -259,12 +286,13 @@ export default function Dashboard() {
       </div>
 
       <Summary summary={summary} />
+      {startedRun && <p role="status">Change copy queued. <Link to={`/jobs/${startedRun}`}>View run #{startedRun}</Link></p>}
 
       <section className="card dash-compare" aria-labelledby="compare-title">
         <div className="dash-compare-head">
-          <h3 id="compare-title" style={{ margin: 0 }}>Row count comparison</h3>
+          <h3 id="compare-title" style={{ margin: 0 }}>Tables &amp; change tracking</h3>
           <p className="dash-muted" style={{ margin: 0 }}>
-            Exact row counts of every table in two schemas, paired by table name (ORDERS matches orders).
+            Recorded source-to-destination mappings are used for tracked tables; other tables are paired by name.
           </p>
         </div>
 
@@ -299,7 +327,7 @@ export default function Dashboard() {
                       disabled={!choice.connectionId || !choice.schema}
                       title={`Read ${name.toLowerCase()} table list and count every table exactly`}
                     >
-                      <RefreshCw size={14} /> Sync {name}
+                      <RefreshCw size={14} /> Refresh {name.toLowerCase()} counts
                     </button>
                   )}
                   <span className="dash-sync-status" aria-live="polite">
@@ -325,7 +353,7 @@ export default function Dashboard() {
         ) : pairs.length === 0 ? (
           <div className="dash-empty">
             {canSync
-              ? 'No counts yet. Press Sync Source and Sync Destination to read both schemas.'
+              ? 'No tables yet. Refresh source and destination counts to read both schemas.'
               : 'No counts yet. Ask an operator to sync these schemas.'}
           </div>
         ) : (
@@ -370,12 +398,15 @@ export default function Dashboard() {
                     <th>Destination table</th>
                     <th className="num">Rows</th>
                     <th className="num">Difference</th>
-                    <th>Status</th>
+                    <th>Count status</th>
+                    <th>Change tracking</th>
+                    <th>Last copied</th>
+                    <th>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
                   {visible.map((p) => (
-                    <tr key={`${p.source?.table ?? ''}|${p.destination?.table ?? ''}`}>
+                    <tr key={`${p.source?.table ?? ''}|${p.destination?.table ?? ''}`} data-table={p.destination?.table ?? p.source?.table}>
                       <td className="dash-name">{p.source?.table ?? <span className="dash-muted">—</span>}</td>
                       <CountCell
                         count={p.source} canSync={canSync && !sync.source.running}
@@ -396,10 +427,12 @@ export default function Dashboard() {
                           {STATUS[p.status].label}
                         </span>
                       </td>
+                      <TableTrackingCells pair={p} canCopy={canSync} onCheck={setReadinessTable} onCopy={setCopyTable}
+                        sourceConnectionId={choices.source.connectionId!} sourceOwner={choices.source.schema} />
                     </tr>
                   ))}
                   {visible.length === 0 && (
-                    <tr><td colSpan={6} className="dash-empty">No tables match.</td></tr>
+                    <tr><td colSpan={9} className="dash-empty">No tables match.</td></tr>
                   )}
                 </tbody>
               </table>
@@ -407,6 +440,10 @@ export default function Dashboard() {
           </>
         )}
       </section>
+      {readinessTable && <ReadinessDialog table={readinessTable} onClose={() => setReadinessTable(null)} />}
+      {copyTable && <TableCopyDialog table={copyTable}
+        targetName={connections.find(c => c.id === copyTable.targetConnectionId)?.name ?? ''}
+        onClose={() => setCopyTable(null)} onStarted={id => { setCopyTable(null); setStartedRun(id); loadComparison(); }} />}
     </div>
   );
 }
@@ -512,6 +549,7 @@ function CountCell({ count, canSync, busy, onRecount }: {
           </button>
         )}
       </div>
+      {count.stale && <div className="dash-count-sub dash-accent">Stale — refresh count</div>}
       {count.error ? (
         <div className="dash-count-sub dash-bad" title={count.error}>{count.error}</div>
       ) : count.countedAt ? (

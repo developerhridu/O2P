@@ -1,6 +1,7 @@
 using System;
 using System.Linq;
 using O2P.Application.RowCounts;
+using O2P.Domain.Entities;
 using Xunit;
 
 namespace O2P.Application.Tests;
@@ -11,6 +12,59 @@ public class RowCountComparisonTests
 
     private static TableCount T(string name, long? rows = 10, string? error = null) =>
         new(name, rows, rows.HasValue ? At : null, 5, error);
+
+    private static TrackedTable Tracker(string target = "renamed_orders") => new() {
+        Id = 42, SourceTable = "ORDERS", TargetTableName = target,
+        Status = TrackedTableStatus.Ready, UpdatedAt = At.AddMinutes(-1)
+    };
+
+    [Fact]
+    public void Recorded_mapping_wins_over_same_name_destination()
+    {
+        var pairs = RowCountComparison.PairTracked(new[] { T("ORDERS") },
+            new[] { T("orders"), T("renamed_orders") }, new[] { Tracker() });
+        var tracked = pairs.Single(p => p.TrackedTableId == 42);
+        Assert.Equal("renamed_orders", tracked.Destination!.Table);
+        Assert.Equal(PairStatus.Match, tracked.Status);
+        Assert.Equal(PairStatus.OnlyDestination, pairs.Single(p => p.Destination!.Table == "orders").Status);
+    }
+
+    [Fact]
+    public void Tracking_is_visible_without_saved_counts()
+    {
+        var pair = Assert.Single(RowCountComparison.PairTracked(Array.Empty<TableCount>(), Array.Empty<TableCount>(), new[] { Tracker() }));
+        Assert.Equal("ORDERS", pair.Source!.Table);
+        Assert.Equal("renamed_orders", pair.Destination!.Table);
+        Assert.Equal(PairStatus.NotCounted, pair.Status);
+        Assert.Null(pair.Source.Rows);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Queued_or_recently_attempted_copies_make_old_counts_stale(bool queued)
+    {
+        var t = Tracker();
+        if (queued) t.ActiveJobRunId = 9;
+        else t.UpdatedAt = At.AddMinutes(1); // failed/cancelled copies may also have applied rows
+        var pair = Assert.Single(RowCountComparison.PairTracked(new[] { T("ORDERS") }, new[] { T("renamed_orders") }, new[] { t }));
+        Assert.True(pair.Source!.Stale);
+        Assert.True(pair.Destination!.Stale);
+        Assert.Equal(PairStatus.NotCounted, pair.Status);
+        Assert.Null(pair.Difference);
+        Assert.Equal(10, pair.Destination.Rows);
+    }
+
+    [Fact]
+    public void Multiple_targets_remain_distinct_without_double_counting_source_rows()
+    {
+        var t = Tracker("orders_archive"); t.Id = 43;
+        var pairs = RowCountComparison.PairTracked(new[] { T("ORDERS") },
+            new[] { T("renamed_orders"), T("orders_archive") }, new[] { Tracker(), t });
+        Assert.Equal(2, pairs.Count);
+        Assert.Equal(10, RowCountComparison.Summarise(pairs).SourceRows);
+        Assert.Equal(20, RowCountComparison.Summarise(pairs).DestinationRows);
+    }
 
     [Fact]
     public void Pairs_upper_case_source_with_lower_case_destination()

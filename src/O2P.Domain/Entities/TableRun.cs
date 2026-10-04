@@ -10,7 +10,10 @@ namespace O2P.Domain.Entities
         [System.Text.Json.Serialization.JsonIgnore]
         public JobRun? JobRun { get; set; }
 
-        public long ManifestTableId { get; set; }
+        public long? ManifestTableId { get; set; }
+        public long? TrackedTableId { get; set; }
+        public string? SourceOwner { get; set; }
+        public string? SourceTable { get; set; }
         public ManifestTable ManifestTable { get; set; } = null!;
 
         public string Status { get; set; } = "Pending"; // Pending | Creating | Chunking | Loading | Indexing | Validating | Done | Failed

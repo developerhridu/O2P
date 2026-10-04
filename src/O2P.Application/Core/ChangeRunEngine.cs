@@ -54,8 +54,8 @@ namespace O2P.Application.Core
                 throw new InvalidOperationException($"Run #{job.Id} is not a change copy.");
             }
 
-            var sourceId = job.Application.Connections.First(c => c.Slot == job.SourceSlot).ConnectionId;
-            var targetId = job.Application.Connections.First(c => c.Slot == job.TargetSlot).ConnectionId;
+            var sourceId = job.SourceConnectionId ?? job.Application.Connections.First(c => c.Slot == job.SourceSlot).ConnectionId;
+            var targetId = job.TargetConnectionId ?? job.Application.Connections.First(c => c.Slot == job.TargetSlot).ConnectionId;
             var source = await _db.Connections.FirstAsync(c => c.Id == sourceId, cancellationToken);
             var target = await _db.Connections.FirstAsync(c => c.Id == targetId, cancellationToken);
 
@@ -86,7 +86,8 @@ namespace O2P.Application.Core
                 // any bulk copy of these tables. (The Worker also clears claims held by finished runs.)
                 await _db.TrackedTables
                     .Where(t => t.ActiveJobRunId == job.Id)
-                    .ExecuteUpdateAsync(s => s.SetProperty(t => t.ActiveJobRunId, (long?)null), CancellationToken.None);
+                    .ExecuteUpdateAsync(s => s.SetProperty(t => t.ActiveJobRunId, (long?)null)
+                        .SetProperty(t => t.UpdatedAt, DateTimeOffset.UtcNow), CancellationToken.None);
 
                 await SettleJobAsync(job.Id);
             }
@@ -99,7 +100,9 @@ namespace O2P.Application.Core
         private async Task<TrackedTable?> ClaimAsync(JobRun job, long targetConnectionId, TableRun run, CancellationToken ct)
         {
             var existing = await _db.TrackedTables.AsNoTracking().FirstOrDefaultAsync(t =>
-                t.TargetConnectionId == targetConnectionId && t.TargetSchema == job.TargetSchema && t.TargetTableName == run.TargetTableName, ct);
+                t.TargetConnectionId == targetConnectionId && t.TargetSchema == job.TargetSchema && t.TargetTableName == run.TargetTableName
+                && (run.TrackedTableId == null || (t.Id == run.TrackedTableId && t.SourceConnectionId == job.SourceConnectionId
+                    && t.SourceOwner == run.SourceOwner && t.SourceTable == run.SourceTable)), ct);
 
             if (existing == null)
             {

@@ -642,6 +642,7 @@ export type TableCount = {
   countedAt: string | null;
   durationMs: number | null;
   error: string | null;
+  stale?: boolean;
 };
 
 export type PairStatus = 'match' | 'missing_rows' | 'extra_rows' | 'only_source' | 'only_destination' | 'not_counted' | 'error';
@@ -652,7 +653,43 @@ export type TablePair = {
   destination: TableCount | null;
   difference: number | null;
   status: PairStatus;
+  tracking: DashboardTrackedTable | null;
 };
+
+export type DashboardTrackedTable = {
+  id: number;
+  sourceConnectionId: number;
+  targetConnectionId: number;
+  sourceOwner: string;
+  sourceTable: string;
+  targetSchema: string;
+  targetTableName: string;
+  status: string;
+  lastSyncedAt: string | null;
+  lastError: string | null;
+  activeJobRunId: number | null;
+  activeStatus: string | null;
+  lastScn: string | null;
+  heldBackBy: { username?: string; program?: string }[] | null;
+};
+
+export type ReadinessTable = { sourceConnectionId: number; sourceOwner: string; sourceTable: string };
+
+export async function checkTableReadiness(table: ReadinessTable): Promise<ChangeReadiness> {
+  const res = await apiFetch(`${API_BASE}/change-tracking/readiness`, {
+    method: 'POST', headers: getHeaders(), body: JSON.stringify(table),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, 'Could not check the source.'));
+  return res.json();
+}
+
+export async function copyTableChanges(id: number, confirmationPhrase: string): Promise<{ id: number }> {
+  const res = await apiFetch(`${API_BASE}/change-tracking/${id}/copy`, {
+    method: 'POST', headers: getHeaders(), body: JSON.stringify({ confirmationPhrase }),
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, 'Could not start copying changes.'));
+  return res.json();
+}
 
 export type RowCountSide = { tables: number; listedAt: string | null; countedAt: string | null };
 

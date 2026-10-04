@@ -21,6 +21,17 @@
 .dash-bad { color: #f87171; }
 .dash-accent { color: #60a5fa; }
 
+.dash-tracking { min-width: 180px; max-width: 270px; }
+.dash-tracking details { margin-top: 6px; font-size: .8rem; color: var(--text-secondary); }
+.dash-tracking summary { cursor: pointer; }
+.dash-tracking p { white-space: normal; overflow-wrap: anywhere; }
+.dash-row-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.dash-table .dash-row-actions { min-width: 145px; }
+.dash-copy-dialog { color: var(--text-primary); width: min(600px, calc(100vw - 32px)); padding: 24px; border: 1px solid var(--border-color); }
+.dash-copy-dialog::backdrop { background: rgba(0,0,0,.72); }
+.dash-copy-dialog p, .dash-copy-dialog label { overflow-wrap: anywhere; }
+.dash-copy-dialog input { display: block; width: 100%; margin: 12px 0 20px; }
+
 /* ---- summary cards -------------------------------------------------------------------------- */
 
 .dash-cards {
