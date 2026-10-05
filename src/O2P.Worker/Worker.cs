@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
@@ -9,6 +10,8 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using O2P.Application.ChangeTracking;
+using O2P.Application.Copying;
 using O2P.Application.Core;
 using O2P.Application.Interfaces;
 using O2P.Application.Schema;
@@ -25,7 +28,9 @@ namespace O2P.Worker
         private readonly GlobalGovernor _governor;
         private readonly IHostApplicationLifetime _lifetime;
         private readonly IConfiguration _configuration;
-        private readonly TokenBucketRateLimiter _rateLimiter = new TokenBucketRateLimiter(50000, 10000);
+        private readonly CopyTuningOptions _tuning;
+        // Null unless Copying:MaxRowsPerSecond is set: an unused limiter still took a lock per row.
+        private readonly TokenBucketRateLimiter? _rateLimiter;
         private DateTimeOffset _workerStartedAt;
 
         public Worker(
@@ -33,13 +38,19 @@ namespace O2P.Worker
             IServiceProvider serviceProvider,
             GlobalGovernor governor,
             IHostApplicationLifetime lifetime,
-            IConfiguration configuration)
+            IConfiguration configuration,
+            CopyTuningOptions tuning)
         {
             _logger = logger;
             _serviceProvider = serviceProvider;
             _governor = governor;
             _lifetime = lifetime;
             _configuration = configuration;
+            _tuning = tuning;
+            if (tuning.MaxRowsPerSecond > 0)
+            {
+                _rateLimiter = new TokenBucketRateLimiter(tuning.MaxRowsPerSecond, Math.Max(1000, tuning.MaxRowsPerSecond / 5));
+            }
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -57,6 +68,9 @@ namespace O2P.Worker
             // recovered — jobs looked "stuck / not checked".
             _ = Task.Run(() => PollCommandsAsync(stoppingToken), stoppingToken);
             _ = Task.Run(() => PrepLoopAsync(stoppingToken), stoppingToken);
+            // Change copies run in their own loop: the prepare loop handles one job at a time, and a long
+            // mining pass inside it would hold up the preparation of every bulk run behind it.
+            _ = Task.Run(() => ChangesLoopAsync(stoppingToken), stoppingToken);
 
             while (!stoppingToken.IsCancellationRequested)
             {
@@ -118,6 +132,164 @@ namespace O2P.Worker
 
                 try { await Task.Delay(2000, stoppingToken); }
                 catch (OperationCanceledException) { return; }
+            }
+        }
+
+        /// <summary>This copier's name in change-run claims, fixed for its lifetime.</summary>
+        private readonly string _changeWorkerId = $"{Environment.MachineName}-{Guid.NewGuid():N}";
+
+        /// <summary>How long a change-run claim lasts without a heartbeat; after that another copier may take it over.</summary>
+        private static readonly TimeSpan ChangeRunLease = TimeSpan.FromMinutes(5);
+
+        /// <summary>
+        /// Picks up change copies, one at a time per copier. A run whose copier died is taken over once its
+        /// claim lapses and simply starts again - applying is repeatable, and each table's tracker only moved
+        /// if that table had fully finished.
+        /// </summary>
+        private async Task ChangesLoopAsync(CancellationToken stoppingToken)
+        {
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                try
+                {
+                    await ReleaseStaleTrackerClaimsAsync(stoppingToken);
+
+                    var jobId = await ClaimChangeRunAsync(stoppingToken);
+                    if (jobId != null)
+                    {
+                        await RunChangeJobAsync(jobId.Value, stoppingToken);
+                        continue; // look for the next one straight away
+                    }
+                }
+                catch (OperationCanceledException) { return; }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Change-copy loop iteration failed; backing off and retrying.");
+                }
+
+                try { await Task.Delay(3000, stoppingToken); }
+                catch (OperationCanceledException) { return; }
+            }
+        }
+
+        /// <summary>
+        /// A tracked table stays claimed only while its change run is going. A run that ended any other way
+        /// (cancel-all, a crash between runs) must not keep blocking the table.
+        /// </summary>
+        private async Task ReleaseStaleTrackerClaimsAsync(CancellationToken ct)
+        {
+            using var scope = _serviceProvider.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            await db.TrackedTables
+                .Where(t => t.ActiveJobRunId != null
+                    && !db.JobRuns.Any(j => j.Id == t.ActiveJobRunId && (j.Status == "Queued" || j.Status == "Running")))
+                .ExecuteUpdateAsync(s => s.SetProperty(t => t.ActiveJobRunId, (long?)null), ct);
+        }
+
+        private async Task<long?> ClaimChangeRunAsync(CancellationToken ct)
+        {
+            using var scope = _serviceProvider.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+            // Same pattern as batch claims: row lock with SKIP LOCKED, so two copiers never take one run.
+            const string sql = @"
+WITH claimed AS (
+    SELECT j.""Id"" FROM o2p.job_runs j
+    WHERE j.""Kind"" = 'changes'
+      AND (j.""Status"" = 'Queued' OR (j.""Status"" = 'Running' AND (j.""LeaseExpiresAt"" IS NULL OR j.""LeaseExpiresAt"" < now())))
+    ORDER BY j.""Id""
+    FOR UPDATE SKIP LOCKED
+    LIMIT 1
+)
+UPDATE o2p.job_runs j
+SET ""Status"" = 'Running', ""WorkerId"" = @worker, ""LeaseExpiresAt"" = now() + @lease, ""StartedAt"" = COALESCE(j.""StartedAt"", now())
+FROM claimed WHERE j.""Id"" = claimed.""Id""
+RETURNING j.""Id"";";
+
+            var conn = (NpgsqlConnection)db.Database.GetDbConnection();
+            await conn.OpenAsync(ct);
+            await using var tx = await conn.BeginTransactionAsync(ct);
+            await using var cmd = new NpgsqlCommand(sql, conn, tx);
+            cmd.Parameters.AddWithValue("worker", _changeWorkerId);
+            cmd.Parameters.AddWithValue("lease", ChangeRunLease);
+            var id = await cmd.ExecuteScalarAsync(ct);
+            await tx.CommitAsync(ct);
+            return id == null ? null : Convert.ToInt64(id);
+        }
+
+        private async Task RunChangeJobAsync(long jobId, CancellationToken stoppingToken)
+        {
+            using var scope = _serviceProvider.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var engine = scope.ServiceProvider.GetRequiredService<ChangeRunEngine>();
+            var secretProtector = scope.ServiceProvider.GetRequiredService<ISecretProtector>();
+
+            var job = await db.JobRuns.Include(j => j.Application).ThenInclude(a => a.Connections).FirstAsync(j => j.Id == jobId, stoppingToken);
+            var sourceId = job.Application.Connections.FirstOrDefault(c => c.Slot == job.SourceSlot)?.ConnectionId;
+            var targetId = job.Application.Connections.FirstOrDefault(c => c.Slot == job.TargetSlot)?.ConnectionId;
+            var source = sourceId == null ? null : await db.Connections.FindAsync(new object[] { sourceId.Value }, stoppingToken);
+            var target = targetId == null ? null : await db.Connections.FindAsync(new object[] { targetId.Value }, stoppingToken);
+            if (source == null || target == null)
+            {
+                job.Status = "Failed";
+                job.CompletedAt = DateTimeOffset.UtcNow;
+                await db.SaveChangesAsync(stoppingToken);
+                return;
+            }
+
+            _logger.LogInformation("Starting change copy {JobId}.", jobId);
+
+            // Keep the claim alive while this copier is working on it.
+            using var heartbeatStop = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+            var heartbeat = Task.Run(async () =>
+            {
+                while (!heartbeatStop.IsCancellationRequested)
+                {
+                    try
+                    {
+                        await Task.Delay(TimeSpan.FromMinutes(1), heartbeatStop.Token);
+                        using var hbScope = _serviceProvider.CreateScope();
+                        var hbDb = hbScope.ServiceProvider.GetRequiredService<AppDbContext>();
+                        await hbDb.JobRuns
+                            .Where(j => j.Id == jobId && j.WorkerId == _changeWorkerId)
+                            .ExecuteUpdateAsync(s => s.SetProperty(j => j.LeaseExpiresAt, DateTimeOffset.UtcNow + ChangeRunLease), heartbeatStop.Token);
+                    }
+                    catch (OperationCanceledException) { return; }
+                    catch (Exception ex) { _logger.LogWarning(ex, "Could not extend the claim on change copy {JobId}.", jobId); }
+                }
+            });
+
+            try
+            {
+                // One Oracle session slot for the whole copy - it mines, then reads rows, and must not push
+                // the copier past the source's session cap alongside bulk batches.
+                using (await _governor.AcquireOracleSessionAsync(stoppingToken))
+                {
+                    await engine.RunAsync(jobId,
+                        secretProtector.Unprotect(source.SecretCiphertext ?? Array.Empty<byte>()),
+                        secretProtector.Unprotect(target.SecretCiphertext ?? Array.Empty<byte>()),
+                        stoppingToken);
+                }
+                _logger.LogInformation("Change copy {JobId} finished.", jobId);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                // Shutting down. The claim lapses and another copier (or this one, restarted) takes over.
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Change copy {JobId} failed.", jobId);
+                await db.JobRuns.Where(j => j.Id == jobId && j.Status == "Running")
+                    .ExecuteUpdateAsync(s => s
+                        .SetProperty(j => j.Status, "Failed")
+                        .SetProperty(j => j.CompletedAt, DateTimeOffset.UtcNow)
+                        .SetProperty(j => j.WorkerId, (string?)null)
+                        .SetProperty(j => j.LeaseExpiresAt, (DateTimeOffset?)null), CancellationToken.None);
+            }
+            finally
+            {
+                heartbeatStop.Cancel();
+                try { await heartbeat; } catch { /* stopped */ }
             }
         }
 
@@ -201,6 +373,7 @@ WITH claimed AS (
     JOIN o2p.table_runs t ON t.""Id"" = c.""TableRunId""
     JOIN o2p.job_runs j ON j.""Id"" = t.""JobRunId""
     WHERE c.""Status"" = 'Pending'
+      AND (c.""RetryAfter"" IS NULL OR c.""RetryAfter"" <= now())
       AND t.""Status"" = 'Loading'
       AND j.""Status"" = 'Running'
     ORDER BY c.""Id""
@@ -237,13 +410,19 @@ RETURNING c.""Id"";";
 
             long rowsWritten = 0;
             bool chunkSucceeded = false;
-            var chunkTimeoutMinutes = Math.Max(1, _configuration.GetValue("Concurrency:ChunkTimeoutMinutes", 20));
+            var progress = new ChunkProgress();
+            var batchClock = System.Diagnostics.Stopwatch.StartNew();
+            var stallLimit = TimeSpan.FromMinutes(Math.Max(1, _tuning.StallMinutes));
 
-            // Absolute ceiling so a hung Oracle/PG call cannot occupy a worker slot forever.
-            // Heartbeats keep the DB lease alive while the process is running; without this
-            // CancelAfter, stalled chunks never fail and the pool looks "stuck".
-            using var chunkCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            chunkCts.CancelAfter(TimeSpan.FromMinutes(chunkTimeoutMinutes));
+            // Three ways a batch is stopped from outside: the stall watchdog (no row moved for StallMinutes -
+            // a slow batch that is still moving is left alone, unlike the old fixed 20-minute limit, which
+            // stopped batches mid-copy and threw their work away); the optional absolute limit; and one side
+            // failing, which stops the other instead of leaving it waiting.
+            using var stallCts = new CancellationTokenSource();
+            using var limitCts = new CancellationTokenSource();
+            using var pairCts = new CancellationTokenSource();
+            if (_tuning.MaxBatchMinutes > 0) limitCts.CancelAfter(TimeSpan.FromMinutes(_tuning.MaxBatchMinutes));
+            using var chunkCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, stallCts.Token, limitCts.Token, pairCts.Token);
             var chunkToken = chunkCts.Token;
 
             // Keep the chunk's lease fresh while it is actively processing. A large single chunk (e.g.
@@ -270,6 +449,43 @@ RETURNING c.""Id"";";
                     catch (Exception ex) { _logger.LogWarning(ex, "Lease heartbeat failed for chunk {ChunkId}.", heartbeatChunkId); }
                 }
             });
+
+            // Every 5 s: stop the batch if nothing has moved for the stall time, otherwise publish its rows and
+            // bytes so far, so the Runs page counts while a batch is in flight instead of jumping at its end.
+            var watcher = Task.Run(async () =>
+            {
+                long lastRows = -1;
+                while (!leaseCts.IsCancellationRequested)
+                {
+                    try { await Task.Delay(TimeSpan.FromSeconds(5), leaseCts.Token); }
+                    catch (OperationCanceledException) { break; }
+
+                    if (progress.SinceLastProgress > stallLimit)
+                    {
+                        _logger.LogWarning("Chunk {ChunkId}: no row has moved for {Minutes} minutes; stopping it.", heartbeatChunkId, stallLimit.TotalMinutes);
+                        stallCts.Cancel();
+                        break;
+                    }
+
+                    var rows = progress.Rows;
+                    if (rows == lastRows) continue;
+                    lastRows = rows;
+                    var bytes = progress.Bytes;
+                    try
+                    {
+                        using var pScope = _serviceProvider.CreateScope();
+                        var pDb = pScope.ServiceProvider.GetRequiredService<AppDbContext>();
+                        await pDb.ChunkLogs
+                            .Where(c => c.Id == heartbeatChunkId && c.Status == "Running")
+                            .ExecuteUpdateAsync(s => s
+                                .SetProperty(c => c.RowsMigrated, rows)
+                                .SetProperty(c => c.BytesMigrated, bytes), CancellationToken.None);
+                    }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Progress update failed for chunk {ChunkId}.", heartbeatChunkId); }
+                }
+            });
+
+            Exception? firstFailure = null;
 
             try
             {
@@ -298,8 +514,24 @@ RETURNING c.""Id"";";
                     pendingChunk,
                     channel.Writer,
                     _rateLimiter,
+                    progress,
                     chunkToken
                 );
+
+                // Whichever side fails first stops the other at once. The reader already hands its error to the
+                // writer through the channel; a failed writer used to leave the reader blocked on a full channel
+                // until the 20-minute limit, which is why every lost batch in the logs reported at 1,200 s.
+                async Task Paired(Task side)
+                {
+                    try { await side; }
+                    catch (Exception ex)
+                    {
+                        Interlocked.CompareExchange(ref firstFailure, ex, null);
+                        channel.Writer.TryComplete(ex);
+                        pairCts.Cancel();
+                        throw;
+                    }
+                }
 
                 var writerTask = pgWriter.WriteDataAsync(
                     pgConnection,
@@ -312,12 +544,14 @@ RETURNING c.""Id"";";
                     pendingChunk.TableRunId,
                     pendingChunk.ChunkIndex,
                     channel.Reader,
+                    progress,
                     chunkToken
                 );
 
-                await Task.WhenAll(readerTask, writerTask);
+                await Task.WhenAll(Paired(readerTask), Paired(writerTask));
 
                 rowsWritten = writerTask.Result;
+                var bytesWritten = progress.Bytes;
 
                 // Only mark Done if still Running — a Cancel command may have set Cancelled mid-flight.
                 var markedDone = await db.ChunkLogs
@@ -327,47 +561,98 @@ RETURNING c.""Id"";";
                         .SetProperty(c => c.CompletedAt, DateTimeOffset.UtcNow)
                         .SetProperty(c => c.LeaseExpiresAt, (DateTimeOffset?)null)
                         .SetProperty(c => c.RowsMigrated, rowsWritten)
+                        .SetProperty(c => c.BytesMigrated, bytesWritten)
+                        .SetProperty(c => c.RetryAfter, (DateTimeOffset?)null)
                         .SetProperty(c => c.ErrorMessage, (string?)null), CancellationToken.None);
 
                 chunkSucceeded = markedDone > 0;
                 if (chunkSucceeded)
                 {
-                    _logger.LogInformation($"Successfully completed chunk {pendingChunk.Id}. Rows: {rowsWritten}");
+                    LogBatchSummary(pendingChunk, rowsWritten, bytesWritten, batchClock.Elapsed, progress);
                 }
                 else
                 {
                     _logger.LogWarning("Chunk {ChunkId} finished after cancel/lease change; not marking Done.", pendingChunk.Id);
                 }
             }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            catch (Exception caught)
             {
-                _logger.LogError(
-                    "Chunk {ChunkId} timed out after {Minutes} minutes (stall watchdog).",
-                    pendingChunk.Id, chunkTimeoutMinutes);
-                await db.ChunkLogs
-                    .Where(c => c.Id == pendingChunk.Id && c.Status == "Running")
-                    .ExecuteUpdateAsync(s => s
-                        .SetProperty(c => c.Status, "Failed")
-                        .SetProperty(c => c.ErrorMessage,
-                            $"Chunk timed out after {chunkTimeoutMinutes} minutes with no completion and was stopped. Use Retry failed to try it again.")
-                        .SetProperty(c => c.LeaseExpiresAt, (DateTimeOffset?)null)
-                        .SetProperty(c => c.CompletedAt, DateTimeOffset.UtcNow), CancellationToken.None);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, $"Chunk {pendingChunk.Id} failed.");
-                await db.ChunkLogs
-                    .Where(c => c.Id == pendingChunk.Id && c.Status == "Running")
-                    .ExecuteUpdateAsync(s => s
-                        .SetProperty(c => c.Status, "Failed")
-                        .SetProperty(c => c.ErrorMessage, ex.Message)
-                        .SetProperty(c => c.LeaseExpiresAt, (DateTimeOffset?)null)
-                        .SetProperty(c => c.CompletedAt, DateTimeOffset.UtcNow), CancellationToken.None);
+                // The side that failed first says why; the other side only saw the cancellation that followed.
+                var failure = firstFailure is not null && firstFailure is not OperationCanceledException ? firstFailure : caught;
+                var stalled = stallCts.IsCancellationRequested;
+                var overLimit = !stalled && limitCts.IsCancellationRequested;
+                var shuttingDown = cancellationToken.IsCancellationRequested && !stalled && !overLimit;
+                var attempt = pendingChunk.AttemptCount;
+
+                string reason = stalled
+                    ? $"No row moved for {stallLimit.TotalMinutes:0} minute{(stallLimit.TotalMinutes == 1 ? "" : "s")}, so the batch was stopped - usually a connection that died without saying so."
+                    : overLimit
+                        ? $"The batch ran longer than the {_tuning.MaxBatchMinutes}-minute limit (Copying:MaxBatchMinutes) and was stopped."
+                        : shuttingDown
+                            ? "The Worker was stopping."
+                            : failure.Message;
+
+                if (shuttingDown)
+                {
+                    // Not the batch's fault: put it straight back so the next Worker start picks it up.
+                    _logger.LogWarning("Chunk {ChunkId} interrupted by Worker shutdown; returned to the queue.", pendingChunk.Id);
+                    await db.ChunkLogs
+                        .Where(c => c.Id == pendingChunk.Id && c.Status == "Running")
+                        .ExecuteUpdateAsync(s => s
+                            .SetProperty(c => c.Status, "Pending")
+                            .SetProperty(c => c.AttemptCount, c => c.AttemptCount - 1)
+                            .SetProperty(c => c.WorkerId, (string?)null)
+                            .SetProperty(c => c.LeaseExpiresAt, (DateTimeOffset?)null)
+                            .SetProperty(c => c.RowsMigrated, 0L)
+                            .SetProperty(c => c.BytesMigrated, 0L), CancellationToken.None);
+                }
+                else if (attempt < _tuning.MaxAttempts && ChunkFailure.IsWorthRetrying(failure, attempt, stalled))
+                {
+                    // A dropped connection, a stall, a restarting database: try again by itself after a wait.
+                    // The batch was one transaction, so nothing of it was kept, and the resume fence stops a
+                    // later attempt writing anything twice.
+                    var retryAt = DateTimeOffset.UtcNow + BatchPlan.RetryDelay(attempt);
+                    _logger.LogWarning(failure,
+                        "Chunk {ChunkId} attempt {Attempt} of {Max} failed after {Seconds:0}s: {Reason} Trying again at {RetryAt:HH:mm:ss}.",
+                        pendingChunk.Id, attempt, _tuning.MaxAttempts, batchClock.Elapsed.TotalSeconds, reason, retryAt.ToLocalTime());
+                    await db.ChunkLogs
+                        .Where(c => c.Id == pendingChunk.Id && c.Status == "Running")
+                        .ExecuteUpdateAsync(s => s
+                            .SetProperty(c => c.Status, "Pending")
+                            .SetProperty(c => c.RetryAfter, retryAt)
+                            .SetProperty(c => c.ErrorMessage, $"Attempt {attempt} failed: {reason} Trying again automatically.")
+                            .SetProperty(c => c.WorkerId, (string?)null)
+                            .SetProperty(c => c.LeaseExpiresAt, (DateTimeOffset?)null)
+                            .SetProperty(c => c.RowsMigrated, 0L)
+                            .SetProperty(c => c.BytesMigrated, 0L), CancellationToken.None);
+                }
+                else
+                {
+                    var message = attempt > 1 ? $"{reason} (after {attempt} attempts)" : reason;
+                    if (!stalled && attempt >= 2 && IsOracleError(failure, ChunkFailure.ObjectNoLongerExists))
+                    {
+                        message = "The source table was changed (moved, truncated or rebuilt) while it was being copied, twice. " +
+                                  "Retry when maintenance on the source has finished. " + failure.Message;
+                    }
+
+                    _logger.LogError(failure, "Chunk {ChunkId} failed after {Seconds:0}s (attempt {Attempt}): {Reason}",
+                        pendingChunk.Id, batchClock.Elapsed.TotalSeconds, attempt, reason);
+                    await db.ChunkLogs
+                        .Where(c => c.Id == pendingChunk.Id && c.Status == "Running")
+                        .ExecuteUpdateAsync(s => s
+                            .SetProperty(c => c.Status, "Failed")
+                            .SetProperty(c => c.ErrorMessage, message)
+                            .SetProperty(c => c.LeaseExpiresAt, (DateTimeOffset?)null)
+                            .SetProperty(c => c.RowsMigrated, 0L)
+                            .SetProperty(c => c.BytesMigrated, 0L)
+                            .SetProperty(c => c.CompletedAt, DateTimeOffset.UtcNow), CancellationToken.None);
+                }
             }
             finally
             {
                 leaseCts.Cancel();
                 try { await leaseHeartbeat; } catch { /* heartbeat cancellation is expected */ }
+                try { await watcher; } catch { /* watcher cancellation is expected */ }
             }
 
             // Roll the completed chunk's row count up to its parent table run with an atomic,
@@ -376,15 +661,45 @@ RETURNING c.""Id"";";
             // scopes, silently undercounting migration progress.
             if (chunkSucceeded && rowsWritten > 0)
             {
+                var bytes = progress.Bytes;
                 await db.TableRuns
                     .Where(t => t.Id == pendingChunk.TableRunId)
-                    .ExecuteUpdateAsync(s => s.SetProperty(t => t.RowsMigrated, t => t.RowsMigrated + rowsWritten), CancellationToken.None);
+                    .ExecuteUpdateAsync(s => s
+                        .SetProperty(t => t.RowsMigrated, t => t.RowsMigrated + rowsWritten)
+                        .SetProperty(t => t.BytesMigrated, t => t.BytesMigrated + bytes), CancellationToken.None);
             }
 
             // Evaluate table-run (and job) completion now that this chunk reached a terminal state.
             _ = Task.Run(() => CheckAndRunValidationAsync(pendingChunk.TableRunId, CancellationToken.None), CancellationToken.None);
 
             return true;
+        }
+
+        /// <summary>
+        /// One line per batch saying where its time went, which answers "is it Oracle, PostgreSQL or the
+        /// link?" without guessing. Waiting for Oracle includes the network from Oracle; waiting for
+        /// PostgreSQL is the reader blocked because the writer had not taken rows yet.
+        /// </summary>
+        private void LogBatchSummary(ChunkLog chunk, long rows, long bytes, TimeSpan elapsed, ChunkProgress progress)
+        {
+            var total = Math.Max(1, elapsed.Ticks);
+            var sourcePct = 100.0 * progress.WaitingForSource.Ticks / total;
+            var destinationPct = 100.0 * progress.WaitingForDestination.Ticks / total;
+            var seconds = Math.Max(0.001, elapsed.TotalSeconds);
+            _logger.LogInformation(
+                "Successfully completed chunk {ChunkId} ({Table} #{ChunkIndex}). Rows: {Rows}, {MB:0.0} MB in {Seconds:0.0}s " +
+                "({RowsPerSecond:0} rows/s, {MBPerSecond:0.00} MB/s) - {SourcePct:0}% waiting for Oracle, {DestinationPct:0}% waiting for PostgreSQL.",
+                chunk.Id, chunk.TableRun?.ManifestTable?.TableName, chunk.ChunkIndex, rows, bytes / (1024.0 * 1024.0), seconds,
+                rows / seconds, bytes / (1024.0 * 1024.0) / seconds, sourcePct, destinationPct);
+        }
+
+        private static bool IsOracleError(Exception exception, int number)
+        {
+            for (var e = exception; e != null; e = e.InnerException)
+            {
+                if (e is Oracle.ManagedDataAccess.Client.OracleException oracle && oracle.Number == number) return true;
+            }
+            return false;
         }
 
         private static async Task<long?> ClaimChunkIdAsync(AppDbContext db, string claimSql, string workerId, CancellationToken cancellationToken)
@@ -407,7 +722,9 @@ RETURNING c.""Id"";";
             }
             catch
             {
-                await tx.RollbackAsync(cancellationToken);
+                // Best effort. If the failure broke the connection, the rollback throws too, and thrown from
+                // here it would replace the real error with "connection is broken" / ObjectDisposedException.
+                try { await tx.RollbackAsync(CancellationToken.None); } catch { /* keep the original */ }
                 throw;
             }
             finally
@@ -487,7 +804,7 @@ RETURNING c.""Id"";";
 
                 var tableRun = await db.TableRuns
                     .Include(t => t.JobRun).ThenInclude(j => j.Application).ThenInclude(a => a.Connections)
-                    .Include(t => t.ManifestTable)
+                    .Include(t => t.ManifestTable).ThenInclude(m => m.Columns)
                     .FirstOrDefaultAsync(t => t.Id == tableRunId, cancellationToken);
                 if (tableRun == null) return;
 
@@ -515,6 +832,11 @@ RETURNING c.""Id"";";
                     var sourcePassword = secretProtector.Unprotect(sourceConn!.SecretCiphertext ?? new byte[0]);
                     var targetPassword = secretProtector.Unprotect(targetConn!.SecretCiphertext ?? new byte[0]);
 
+                    // Every batch is done and the constraints are back, which is all change tracking
+                    // needs. Set it up before the row-count check, and regardless of its result: against
+                    // a live source that check usually differs, and tracking is what closes the gap.
+                    await RegisterTrackedTableAsync(db, tableRun, sourceConnId, targetConnId, cancellationToken);
+
                     var result = await validator.ValidateTableRunAsync(tableRun, sourceConn, sourcePassword, targetConn, targetPassword, cancellationToken);
                     db.ValidationResults.Add(result);
 
@@ -536,6 +858,72 @@ RETURNING c.""Id"";";
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error checking or running validation.");
+            }
+        }
+
+        /// <summary>
+        /// Commands for a change run. Only cancel means anything: pause, resume and retry do not apply (the
+        /// API refuses them; a retry is simply a new change run), so any that arrive are ignored.
+        /// </summary>
+        private static async Task HandleChangeRunCommandAsync(AppDbContext db, JobRun job, JobCommand cmd, CancellationToken cancellationToken)
+        {
+            if (cmd.Command != "cancel") return;
+            if (job.Status is "Completed" or "CompletedWithErrors" or "Failed" or "Cancelled") return;
+
+            job.Status = "Cancelled";
+            job.CompletedAt = DateTimeOffset.UtcNow;
+
+            // Tables not started yet are settled here. A table being copied right now is settled by the
+            // change loop itself, which checks the run's status between batches - it alone knows what it
+            // has already applied.
+            await db.TableRuns
+                .Where(t => t.JobRunId == job.Id && t.Status == "Pending")
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(t => t.Status, "Cancelled")
+                    .SetProperty(t => t.CompletedAt, DateTimeOffset.UtcNow)
+                    .SetProperty(t => t.ErrorMessage, "Cancelled before it started. Nothing was changed in this table."), cancellationToken);
+        }
+
+        /// <summary>
+        /// Sets up (or refreshes) change tracking for a bulk table that just finished loading. A copy that
+        /// cannot be tracked is not an error - the bulk copy succeeded - so the reason is only recorded as a
+        /// run event for the operator to see.
+        /// </summary>
+        private async Task RegisterTrackedTableAsync(AppDbContext db, TableRun tableRun, long sourceConnectionId, long targetConnectionId, CancellationToken cancellationToken)
+        {
+            try
+            {
+                var (fresh, reason) = TrackedTableSetup.FromBulkCopy(
+                    tableRun, sourceConnectionId, targetConnectionId, tableRun.JobRun!.TargetSchema, DateTimeOffset.UtcNow);
+
+                if (fresh == null)
+                {
+                    db.RunEvents.Add(new RunEvent
+                    {
+                        JobRunId = tableRun.JobRunId,
+                        Actor = "system",
+                        Event = "table.not_trackable",
+                        DetailJson = JsonSerializer.Serialize(new { table = tableRun.TargetTableName, reason }),
+                        At = DateTimeOffset.UtcNow
+                    });
+                    await db.SaveChangesAsync(cancellationToken);
+                    return;
+                }
+
+                var existing = await db.TrackedTables.FirstOrDefaultAsync(t =>
+                    t.TargetConnectionId == targetConnectionId
+                    && t.TargetSchema == fresh.TargetSchema
+                    && t.TargetTableName == fresh.TargetTableName, cancellationToken);
+
+                if (existing == null) db.TrackedTables.Add(fresh);
+                else TrackedTableSetup.Apply(existing, fresh);
+
+                await db.SaveChangesAsync(cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                // Never let tracking bookkeeping fail a bulk copy that has already loaded its rows.
+                _logger.LogWarning(ex, "Could not set up change tracking for table run {TableRunId}.", tableRun.Id);
             }
         }
 
@@ -673,7 +1061,13 @@ RETURNING c.""Id"";";
                         cmd.ProcessedAt = DateTimeOffset.UtcNow;
                         
                         var job = await db.JobRuns.FindAsync(new object[] { cmd.JobRunId }, cancellationToken);
-                        if (job != null)
+                        if (job != null && JobRunKind.IsChanges(job.Kind))
+                        {
+                            // Never the bulk handling below: its cancel restores constraints with a truncate
+                            // and its retry sends tables back through prepare, which empties them.
+                            await HandleChangeRunCommandAsync(db, job, cmd, cancellationToken);
+                        }
+                        else if (job != null)
                         {
                             if (cmd.Command == "launch" && job.Status == "Queued") job.Status = "Queued";
                             else if (cmd.Command == "pause") job.Status = "Paused";
@@ -730,6 +1124,9 @@ RETURNING c.""Id"";";
                                         .SetProperty(c => c.ErrorMessage, (string?)null)
                                         .SetProperty(c => c.LeaseExpiresAt, (DateTimeOffset?)null)
                                         .SetProperty(c => c.CompletedAt, (DateTimeOffset?)null)
+                                        // A manual retry gets the full set of automatic attempts again, straight away.
+                                        .SetProperty(c => c.AttemptCount, 0)
+                                        .SetProperty(c => c.RetryAfter, (DateTimeOffset?)null)
                                         .SetProperty(c => c.WorkerId, (string?)null), cancellationToken);
 
                                 // Table runs that failed during planning (e.g. a transient Oracle
@@ -786,9 +1183,12 @@ RETURNING c.""Id"";";
 
             // Queued jobs first; also pick Running jobs that still have Pending tables (Retry failed
             // after a cancel/planning failure) so StartTableRunAsync can plan them.
+            // Bulk runs only. Preparing a table creates or empties it, and a change run's tables are live
+            // tracked tables; change runs are claimed by their own loop instead.
             var job = await db.JobRuns
                 .Include(j => j.Application).ThenInclude(a => a.Connections)
                 .Include(j => j.TableRuns)
+                .Where(j => j.Kind != JobRunKind.Changes)
                 .Where(j => j.Status == "Queued"
                     || (j.Status == "Running" && j.TableRuns.Any(t => t.Status == "Pending")))
                 .OrderBy(j => j.Status == "Queued" ? 0 : 1)

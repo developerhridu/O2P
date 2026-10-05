@@ -129,7 +129,7 @@ Tick every box before opening the UI.
 | `This account is temporarily locked due to repeated failed sign-in attempts.` | 5 failed attempts → locked for 15 minutes | Wait, or ask an Admin to click **Unlock** on the Users page |
 | `Cannot reach the API. Check that O2P.Api is running and try again.` | API is down, or the UI cannot reach it | Tell your administrator |
 
-Your session lasts **20 minutes**. There is no refresh; when it expires you are sent back to the sign-in page and must sign in again. Do this before starting long editing sessions, such as a large table selection.
+Your session lasts **7 days** in this browser. There is no refresh: when it expires you are sent back to the sign-in page and must sign in again. It ends early if an administrator resets your password or deactivates you, or when you change your password or sign out.
 
 ### 3.2 Update Password (forced on first login)
 
@@ -172,7 +172,7 @@ You can change your password any time from the sidebar: **Change Password**.
 
 | Menu item | Use it for |
 |---|---|
-| **Dashboard** | A static landing page. The tiles (*Active Jobs*, *Total Migrated (GB)*, *Global Throughput*) always show zero — **do not use it to monitor migrations.** Use **Runs** instead. |
+| **Dashboard** | Runs in progress, data copied in the last 24 hours, current speed and the last run; below them, the **row count comparison** of a source and a destination schema (see [11.3](#113-compare-whole-schemas-on-the-dashboard)). |
 | **Databases** | Oracle source and PostgreSQL target profiles |
 | **Migrations** | Groups connections, table selections and jobs for one system. **This is where you build table selections and launch jobs.** |
 | **Runs** | List of every migration job, refreshed every 5 seconds |
@@ -295,7 +295,19 @@ An **migration** is your container for one migration project: its database roles
 
 If nothing happens, you probably lack Operator/Admin rights or the name already exists (the UI shows no error in either case).
 
-The migration appears as a card. Click **Manage** to open it. (The trash icon, *Delete Migration*, is Admin-only and also deletes all its table selections and job history.)
+The migration appears as a card. Click **Manage** to open it.
+
+### 7.1a Rename or delete a migration or a table selection
+
+| What | Where | Who | Notes |
+|---|---|---|---|
+| Rename a migration (and change its description) | **Rename** at the top of the migration page | Admin, Operator | Its databases, table selections and runs stay as they are. A name another migration already has — in any upper/lower case — is refused |
+| Delete a migration | **Delete migration** at the top of the migration page, or the trash icon on its card in the list | Admin | Also deletes its table selections and run history. The databases, and tables already copied into the destination, are not touched |
+| Rename a table selection | The pencil beside its name, or the name box at the top of the builder (saved with **Save selection**) | Admin, Operator | Its tables and runs stay as they are. Names must be different within one migration |
+| Delete a table selection | The red bin at the end of its row | Admin, Operator | Also deletes the history of every run made from it. Tables already copied into the destination, and their change tracking, are not touched |
+
+Every delete asks first. A delete is refused while a run it would remove is still waiting, running or paused;
+the message names the run — cancel it, then delete.
 
 ### 7.2 Bind database roles
 
@@ -595,6 +607,38 @@ Click **View Details**, or you land here after launching. The page refreshes eve
 
 There is no ETA. Use **Rows** from the table selection and the *Active Rate* card to estimate. Throughput is capped at roughly 50,000 rows/second across the whole Worker, and tables are prepared one after another. LOB-heavy tables are much slower. You can close the browser; the job continues in the Worker.
 
+### 10.5 Copy changes: keep a copied table up to date
+
+After a bulk copy, the Oracle source keeps changing. **Copy changes** copies just what changed since the last
+copy — new rows added, changed rows updated, deleted rows deleted — without emptying or recreating anything.
+Full details, including what your DBA must switch on: User Guide, *Keep the destination up to date*.
+
+On the migration page, each table selection has two buttons beside **Start Run**:
+
+| Button | What it does |
+|---|---|
+| **Check change tracking** | Looks at the source for everything Copy changes needs, for the ticked tables. Read-only. Shows the database layout, a tick or cross per item, a line per table, and **For your DBA** — the SQL for whatever is missing, with **Copy SQL** |
+| **Copy changes** | Opens the same dialog as Start Run (copy from, copy to, destination schema, and the typed phrase for a live destination) and starts a change copy. Tables not tracked in that destination are left out, and the run says which and why |
+
+Run **Check change tracking** before the bulk copy: tracking starts only for a bulk copy that began while the
+source was ready.
+
+The **Change tracking** panel below lists each tracked table:
+
+| Status | Meaning |
+|---|---|
+| **Ready for first change copy** | Set up by a bulk copy that created the table. The first Copy changes also removes any row the bulk copy picked up twice, then adds the table's primary key |
+| **Tracking** | Up to date as of *Last copied*; the next Copy changes continues from there |
+| **Needs a bulk copy** | The change history cannot describe what happened (a truncate, a structural change, deleted archived logs, …). The note says which. Run a bulk copy to track it again |
+
+*Held back by N open Oracle transactions* means those transactions had not committed when the last copy ran;
+their rows are looked at again by the next copy. Hover it for details.
+
+A change copy on the Runs page is tagged **Change copy**. Its page shows *rows added or updated* and *rows
+deleted* per table instead of batches and speed, and has no row-count check (the destination also holds rows the
+copy did not touch). It can be cancelled but not retried or paused: press **Copy changes** again instead — it
+continues from the last successful copy, and repeating work is harmless.
+
 ---
 
 ## 11. Step 7 — Verify the result
@@ -642,6 +686,38 @@ Suggested sign-off list:
 
 > The leftover table `_o2p_chunk_log` in the target schema is O2P's bookkeeping for duplicate-safe batch loads. Keep it until you are done re-running; drop it afterwards if you like.
 
+### 11.3 Compare whole schemas on the Dashboard
+
+The **Row count comparison** on the Dashboard counts every table in two schemas exactly and puts them side by side. Unlike the check in 11.1 it does not depend on a run: it covers every table, including ones no migration touched.
+
+1. Under **Source**, pick the Oracle database and schema. Under **Destination**, pick the PostgreSQL database and schema. The page remembers your choice in this browser.
+2. Press **Sync Source**. O2P reads the schema's current list of tables, then counts each table with an exact `COUNT(*)`, one at a time. The line beside the button shows which table it is on (`Counting 12 of 140: ORDERS`).
+3. Press **Sync Destination** to do the same on PostgreSQL. The two syncs can run at the same time.
+
+Tables are paired by name, ignoring case, so Oracle's `ORDERS` pairs with PostgreSQL's `orders`. If the destination has both `ORDERS` and `orders`, the exact-case match wins. A table O2P gave a suffix (such as `orders_1`) shows up as two unpaired tables.
+
+| Status | Meaning |
+|---|---|
+| **Match** | Same number of rows on both sides |
+| **Missing rows** | The destination has fewer rows. *Difference* shows how many, e.g. `−15` |
+| **Extra rows** | The destination has more rows |
+| **Only in source** / **Only in destination** | No table with that name on the other side |
+| **Not counted** | One side has not been counted yet |
+| **Error** | The last count failed; hover over the message under the number to read it all. The previous number is kept |
+
+- **Counts are saved.** The page opens with the last counts. Under each number it says when it was taken; hover over that text to see the exact time and how long the count took.
+- **Refresh one table:** use the ⟳ next to its number.
+- **Stop** cancels the count that is running in the database. Tables already counted keep their new numbers.
+- **Filters:** *Differences*, *Only one side* and *Not counted* narrow the list. The search box finds a table by name.
+- **Difference in paired tables** adds up only tables that exist and are counted on both sides.
+- **Whole tables are counted**, ignoring any row filter a migration uses, so a filtered table shows *Missing rows* even after a perfect copy.
+- **Large tables over a VPN** can take minutes each. Counting reads every row, so avoid it on a busy production source during peak hours.
+- **Tables left out:**
+  - Oracle tables in the recycle bin and temporary tables;
+  - PostgreSQL partitions: the partitioned table is counted once, and that count includes them;
+  - O2P's `_o2p_chunk_log`.
+- **Who can do what:** Admins and Operators can sync. Viewers see the saved counts, and can pick only schemas someone has already synced.
+
 ---
 
 ## 12. Step 8 — Fix problems and re-run
@@ -652,7 +728,8 @@ Suggested sign-off list:
 | **Readiness check failed** | Fix the named cause (see [Step 5](#91-what-happens-on-launch)), then click **Start Run** again |
 | **A table is Failed** | Expand it and read the red error text and the red batch tooltips. Fix the cause, then **start a new job** (below) |
 | **CompletedWithErrors, count mismatch** | Usually the source changed during the run, a target trigger/constraint interfered, or a filter was set. Fix, then re-run |
-| **Batch timed out** (`Chunk timed out after N minutes … (stall watchdog)`) | A slow read or network issue. Ask your administrator to lower concurrency or raise the timeout, then re-run |
+| **Attempt N failed … Trying again automatically** | A connection dropped or the batch stopped moving. Nothing to do: it is queued again by itself after a short wait |
+| **No row moved for N minutes … (after 5 attempts)** | The problem did not clear. Ask your administrator to check the network and the databases, then use **Retry failed** |
 | **Wrong tables/filters** | Edit the table selection, save, and launch a new job |
 | **Want to stop** | **Cancel job**. The target tables being loaded are emptied |
 
@@ -700,7 +777,7 @@ Goal: copy Oracle schema `HR` to PostgreSQL schema `hr_target` in database `TARG
 | Login | `Invalid credentials` | Wrong password, or more than 5 attempts in 5 minutes → retype / wait |
 | Login | `…temporarily locked…` | 5 failed attempts → wait 15 minutes or an Admin clicks **Unlock** |
 | Login | `Cannot reach the API…` | API stopped or wrong address → call your administrator |
-| Any page | Suddenly back at Sign in | 20-minute session expired → sign in again |
+| Any page | Suddenly back at Sign in | 7-day session expired, or your password was changed or reset → sign in again |
 | Connections | **Failed** + `Connection failed: …` | Wrong host/port/service/credentials, firewall, or listener down; the host must be reachable from the *API/Worker* server, not your PC |
 | Connections | `A connection profile named "…" already exists…` | Pick a different **Profile Name** |
 | Connections | `…Admin role required` | Only Admin can create/edit/delete connections |
@@ -722,7 +799,7 @@ Goal: copy Oracle schema `HR` to PostgreSQL schema `hr_target` in database `TARG
 | Job | `Chunk timed out after N minutes…` | Slow read/network or heavy LOBs → administrator lowers concurrency or raises timeout; re-run |
 | Job | ORA-50000 / connection timeouts to Oracle | Too many concurrent Oracle sessions → administrator lowers concurrency |
 | Job | **CompletedWithErrors**, counts differ | Source changed during the run, target trigger, or a filter → freeze source, re-run |
-| PostgreSQL | `relation "employees" does not exist` | Names are upper-case and quoted → use `"EMPLOYEES"` |
+| PostgreSQL | `relation "EMPLOYEES" does not exist` | Tables O2P creates are lower case → use `employees`. A table copied by an older version keeps its upper-case name and must be quoted: `"EMPLOYEES"` |
 
 Still stuck? Collect: the job number, the failing table and its red error text, and the time. Your administrator can find the details in the API and Worker logs (`logs/`), or with the `tools/job-inspect` command-line tool.
 
@@ -734,16 +811,16 @@ O2P copies **table structures and rows**. Plan a DBA task for the rest.
 
 | Not migrated | What to do |
 |---|---|
-| Primary keys, unique keys, foreign keys, check constraints on **newly created** tables | Create them in PostgreSQL after the load (constraints already on a pre-existing target table are restored) |
+| Primary keys, unique keys, foreign keys, check constraints on **newly created** tables | Create them in PostgreSQL after the load (constraints already on a pre-existing target table are restored). A tracked table gets its primary key from its first **Copy changes** |
 | Indexes | Create after the load (faster than loading into indexed tables) |
 | Sequences, identity columns, column defaults | Recreate; set sequence values above the current max IDs |
 | Views, materialized views | Recreate/convert |
 | Procedures, functions, packages, triggers | Rewrite in PL/pgSQL |
 | Synonyms, grants, users, roles | Recreate |
-| Ongoing changes (CDC / replication) | Not supported — freeze the source, or plan a cut-over window |
+| Continuous replication | Changes are copied only when you press **Copy changes** ([§10.5](#105-copy-changes-keep-a-copied-table-up-to-date)) — press it again before cut-over, after writes stop |
 | Reject rows | A bad row fails its whole batch; there is no reject table |
 
-Also remember: table and column names keep their upper-case spelling and are created in quotes, so migration SQL against the new database must quote identifiers, or you must rename objects to lower case afterwards (`ALTER TABLE "HR"."EMPLOYEES" RENAME TO employees;`).
+Also remember: tables and columns O2P creates are lower case, so SQL against them needs no quotes. Tables copied by an older version of O2P keep their upper-case names; quote those, or rename them yourself (`ALTER TABLE hr."EMPLOYEES" RENAME TO employees;`) — O2P then finds and reuses the lower-case one.
 
 **Post-migration checklist for the DBA**
 

@@ -7,6 +7,8 @@ using O2P.Infrastructure.Metadata;
 using O2P.Application.Interfaces;
 using Oracle.ManagedDataAccess.Client;
 using Npgsql;
+using O2P.Infrastructure.Oracle;
+using O2P.Infrastructure.Postgres;
 using System;
 using System.Linq;
 using System.Threading;
@@ -101,6 +103,8 @@ namespace O2P.Api.Controllers
             if (conn == null) return NotFound();
 
             _db.Connections.Remove(conn);
+            // Saved Dashboard counts have no foreign key (see TableRowCount); remove them with the database.
+            _db.TableRowCounts.RemoveRange(_db.TableRowCounts.Where(c => c.ConnectionId == id));
             await _db.SaveChangesAsync();
             return NoContent();
         }
@@ -177,7 +181,7 @@ namespace O2P.Api.Controllers
                         ConnectionTimeout = 5
                     };
 
-                    using var oracleConn = new OracleConnection(csb.ConnectionString);
+                    using var oracleConn = OracleConnectionSettings.Create(csb);
                     await oracleConn.OpenAsync();
 
                     var latencyMs = (DateTime.UtcNow - latencyStart).TotalMilliseconds;
@@ -221,7 +225,7 @@ namespace O2P.Api.Controllers
                         CommandTimeout = 5
                     };
 
-                    using var pgConn = new NpgsqlConnection(csb.ConnectionString);
+                    using var pgConn = new NpgsqlConnection(PostgresConnectionSettings.Harden(csb).ConnectionString);
                     await pgConn.OpenAsync();
 
                     var latencyMs = (DateTime.UtcNow - latencyStart).TotalMilliseconds;

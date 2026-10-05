@@ -44,13 +44,23 @@ export function getAuthState(): AuthState | null {
 }
 
 async function readErrorMessage(res: Response, fallback: string): Promise<string> {
+  let text = '';
   try {
-    const data = await res.json();
+    text = await res.text();
+  } catch {
+    return fallback;
+  }
+  try {
+    const data = JSON.parse(text);
     if (typeof data === 'string' && data.trim()) return data;
     if (data && typeof data.message === 'string' && data.message.trim()) return data.message;
     if (data && typeof data.title === 'string' && data.title.trim()) return data.title;
   } catch {
-    // response body wasn't JSON (or was empty) - fall through to the generic message
+    // Not JSON. The API sends its plain-sentence refusals (Conflict("..."), BadRequest("...")) as
+    // text/plain, and those sentences are exactly what the user needs to read - so use the text,
+    // unless it looks like an HTML error page rather than a message.
+    const plain = text.trim();
+    if (plain && plain.length <= 1000 && !plain.startsWith('<')) return plain;
   }
   return fallback;
 }
@@ -231,6 +241,23 @@ export async function updateApplication(id: number, app: any) {
   return res.json();
 }
 
+// Name and description only - unlike updateApplication, this leaves the database choices alone.
+export async function renameApplication(id: number, details: { name: string; description?: string | null }) {
+  const res = await apiFetch(`${API_BASE}/applications/${id}`, {
+    method: 'PATCH',
+    headers: getHeaders(),
+    body: JSON.stringify(details)
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, 'Could not rename the migration.'));
+  return res.json();
+}
+
+/** Deletes a migration with its table selections and run history. Refused while any of its runs is in progress. */
+export async function deleteApplication(id: number) {
+  const res = await apiFetch(`${API_BASE}/applications/${id}`, { method: 'DELETE', headers: getHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, 'Could not delete the migration.'));
+}
+
 // Discovery
 export async function fetchDiscoveredTables(connectionId: number, owner: string) {
   const res = await apiFetch(`${API_BASE}/connections/${connectionId}/discovery?owner=${encodeURIComponent(owner)}`, {
@@ -327,6 +354,22 @@ export async function updateManifestTables(manifestId: number, tables: any[]) {
   if (!res.ok) throw new Error(await readErrorMessage(res, 'Could not save the selected tables.'));
 }
 
+export async function renameManifest(manifestId: number, name: string) {
+  const res = await apiFetch(`${API_BASE}/manifests/${manifestId}`, {
+    method: 'PATCH',
+    headers: getHeaders(),
+    body: JSON.stringify({ name })
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, 'Could not rename the table selection.'));
+  return res.json();
+}
+
+/** Deletes a table selection and the history of runs made from it. Refused while any of those runs is in progress. */
+export async function deleteManifest(manifestId: number) {
+  const res = await apiFetch(`${API_BASE}/manifests/${manifestId}`, { method: 'DELETE', headers: getHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, 'Could not delete the table selection.'));
+}
+
 export async function generateManifest(appId: number, connectionId: number, owner: string) {
   const res = await apiFetch(`${API_BASE}/applications/${appId}/manifests/generate?connectionId=${connectionId}&owner=${encodeURIComponent(owner)}`, {
     method: 'POST',
@@ -389,6 +432,80 @@ export async function launchJob(id: number, confirmationPhrase?: string) {
     // "Preflight check failed" and has no idea which check stopped the launch.
     const message = err.message || 'Could not start the run.';
     throw new Error(err.errors ? `${message}\n${err.errors}` : message);
+  }
+  return res.json();
+}
+
+// ---- change tracking ("Copy changes") -----------------------------------------------------------
+
+export type OpenTransaction = { startScn: number; username: string | null; program: string | null; machine: string | null; startedAt: string | null };
+
+export type TrackedTable = {
+  id: number;
+  sourceOwner: string;
+  sourceTable: string;
+  sourceSlots: string[];
+  targetSlots: string[];
+  targetSchema: string;
+  targetTableName: string;
+  status: 'needs_first_sync' | 'ready' | 'needs_bulk_copy';
+  /** Text, not a number: SCNs can exceed what a JavaScript number holds exactly. */
+  lastScn: string | null;
+  lastSyncedAt: string | null;
+  lastError: string | null;
+  activeJobRunId: number | null;
+  heldBackBy: OpenTransaction[] | null;
+  setUpFromTableRunId: number | null;
+  updatedAt: string;
+};
+
+export async function fetchTrackedTables(appId: number): Promise<TrackedTable[]> {
+  const res = await apiFetch(`${API_BASE}/applications/${appId}/tracked-tables`, { headers: getHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, 'Could not load the tracked tables.'));
+  return res.json();
+}
+
+export type ReadinessItem = { name: string; ok: boolean; detail: string; fixSql: string | null };
+export type TableReadiness = { owner: string; table: string; ok: boolean; problems: string[]; fixSql: string[] };
+export type ChangeReadiness = {
+  mode: number;
+  layout: string;
+  version: string | null;
+  ready: boolean;
+  items: ReadinessItem[];
+  tables: TableReadiness[];
+  oldestHistory: string | null;
+};
+
+// Read-only on the source: it reports what is missing and the SQL a DBA would run, and changes nothing.
+export async function checkChangeReadiness(appId: number, sourceSlot: string, manifestId: number): Promise<ChangeReadiness> {
+  const res = await apiFetch(`${API_BASE}/applications/${appId}/change-readiness`, {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify({ sourceSlot, manifestId })
+  });
+  if (!res.ok) throw new Error(await readErrorMessage(res, 'Could not check the source.'));
+  return res.json();
+}
+
+export type CopyChangesResult = { id: number; tables: number; skipped: { table: string; reason: string }[] };
+
+export async function copyChanges(
+  appId: number,
+  manifestId: number,
+  body: { sourceSlot: string; targetSlot: string; targetSchema: string; confirmationPhrase?: string }
+): Promise<CopyChangesResult> {
+  const res = await apiFetch(`${API_BASE}/applications/${appId}/manifests/${manifestId}/copy-changes`, {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    const message = (typeof err === 'string' ? err : err.message) || 'Could not start copying changes.';
+    // When nothing could be copied, say which tables and why - that is the whole answer.
+    const skipped: { table: string; reason: string }[] = err.skipped ?? [];
+    throw new Error(skipped.length ? `${message}\n${skipped.map((s) => `${s.table}: ${s.reason}`).join('\n')}` : message);
   }
   return res.json();
 }
@@ -492,4 +609,97 @@ export async function unlockUser(id: string) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.message || 'Could not unlock the user.');
   return data;
+}
+
+// ---- Dashboard ------------------------------------------------------------------------------
+
+export type DashboardSummary = {
+  runsInProgress: number;
+  copiedRows24h: number;
+  copiedBytes24h: number;
+  rowsPerSecond: number;
+  mbPerSecond: number;
+  lastRun: {
+    id: number;
+    status: string;
+    kind: string;
+    application: string;
+    createdAt: string;
+    startedAt: string | null;
+    completedAt: string | null;
+  } | null;
+};
+
+export async function fetchDashboardSummary(): Promise<DashboardSummary> {
+  const res = await apiFetch(`${API_BASE}/dashboard/summary`, { headers: getHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, 'Could not load the dashboard.'));
+  return res.json();
+}
+
+export type TableCount = {
+  table: string;
+  rows: number | null;
+  countedAt: string | null;
+  durationMs: number | null;
+  error: string | null;
+};
+
+export type PairStatus = 'match' | 'missing_rows' | 'extra_rows' | 'only_source' | 'only_destination' | 'not_counted' | 'error';
+
+export type TablePair = {
+  key: string;
+  source: TableCount | null;
+  destination: TableCount | null;
+  difference: number | null;
+  status: PairStatus;
+};
+
+export type RowCountSide = { tables: number; listedAt: string | null; countedAt: string | null };
+
+export type RowCountComparison = {
+  source: RowCountSide;
+  destination: RowCountSide;
+  pairs: TablePair[];
+};
+
+/** Saved counts of both schemas, paired by table name. Reads neither database. */
+export async function fetchRowCountComparison(
+  sourceConnectionId: number, sourceSchema: string, targetConnectionId: number, targetSchema: string
+): Promise<RowCountComparison> {
+  const q = new URLSearchParams({
+    sourceConnectionId: String(sourceConnectionId),
+    sourceSchema,
+    targetConnectionId: String(targetConnectionId),
+    targetSchema,
+  });
+  const res = await apiFetch(`${API_BASE}/row-counts?${q}`, { headers: getHeaders() });
+  if (!res.ok) throw new Error(await readErrorMessage(res, 'Could not load the row counts.'));
+  return res.json();
+}
+
+/** Schemas with saved counts for a database: what a Viewer can pick from. */
+export async function fetchSavedCountSchemas(connectionId: number): Promise<string[]> {
+  const res = await apiFetch(`${API_BASE}/row-counts/schemas?connectionId=${connectionId}`, { headers: getHeaders() });
+  if (!res.ok) return [];
+  return (await res.json()).schemas ?? [];
+}
+
+/** Reads the schema's current table list from the database and saves it. */
+export async function refreshCountTables(connectionId: number, schema: string, signal?: AbortSignal): Promise<string[]> {
+  const res = await apiFetch(
+    `${API_BASE}/connections/${connectionId}/row-counts/tables?schema=${encodeURIComponent(schema)}`,
+    { method: 'POST', headers: getHeaders(), signal }
+  );
+  if (!res.ok) throw new Error(await readErrorMessage(res, `Could not read the tables of ${schema}.`));
+  return (await res.json()).tables ?? [];
+}
+
+/** Exact count of one table, saved. A failed count comes back with `error` set, not as an exception. */
+export async function countTable(connectionId: number, schema: string, table: string, signal?: AbortSignal): Promise<TableCount> {
+  const res = await apiFetch(
+    `${API_BASE}/connections/${connectionId}/row-counts/count?schema=${encodeURIComponent(schema)}&table=${encodeURIComponent(table)}`,
+    { method: 'POST', headers: getHeaders(), signal }
+  );
+  if (!res.ok) throw new Error(await readErrorMessage(res, `Could not count ${table}.`));
+  return res.json();
 }

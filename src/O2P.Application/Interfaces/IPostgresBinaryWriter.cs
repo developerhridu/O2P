@@ -1,3 +1,4 @@
+using O2P.Application.Copying;
 using O2P.Domain.Entities;
 using System.Collections.Generic;
 using System.Threading;
@@ -13,6 +14,6 @@ namespace O2P.Application.Interfaces
         /// Oracle's own spelling for a table an earlier run left behind. Resolved once when the table
         /// is prepared and read back from TableRun for every batch, so all the batches of one run agree.
         /// </param>
-        Task<long> WriteDataAsync(Connection connection, string password, string targetSchema, string targetTable, IReadOnlyList<ManifestColumn> columns, string? targetNameStyle, long jobRunId, long tableRunId, int chunkIndex, ChannelReader<object[]> inputChannel, CancellationToken cancellationToken);
+        Task<long> WriteDataAsync(Connection connection, string password, string targetSchema, string targetTable, IReadOnlyList<ManifestColumn> columns, string? targetNameStyle, long jobRunId, long tableRunId, int chunkIndex, ChannelReader<object[]> inputChannel, ChunkProgress? progress, CancellationToken cancellationToken);
     }
 }

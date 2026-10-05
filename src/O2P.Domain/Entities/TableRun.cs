@@ -38,6 +38,31 @@ namespace O2P.Domain.Entities
         /// </summary>
         public string? TargetNameStyle { get; set; }
 
+        /// <summary>
+        /// Bulk runs: the Oracle SCN change tracking would continue from, recorded before the first batch
+        /// read a row - min(S0 - 1, oldest open transaction start - 1), so nothing changed during the load
+        /// is missed. Null when it could not be read (missing privilege, mock source); such a copy cannot
+        /// be tracked, and the bulk copy itself is unaffected.
+        /// </summary>
+        public decimal? SourceStartScn { get; set; }
+
+        /// <summary>
+        /// Whether ARCHIVELOG and the supplemental logging change tracking needs were already on when this
+        /// bulk copy started. Redo written before they were on carries no keys, so a copy started without
+        /// them cannot be tracked.
+        /// </summary>
+        public bool? LoggingReadyAtStart { get; set; }
+
+        /// <summary>Oracle object and partition ids at the start of a bulk copy, as JSON; see TrackedTable.</summary>
+        public string? SourceObjectIdsJson { get; set; }
+
+        /// <summary>The Oracle primary key at the start of a bulk copy, as JSON; null when it has none usable.</summary>
+        public string? SourceKeyJson { get; set; }
+
+        // Change runs: what applying the changes did.
+        public long RowsWritten { get; set; } = 0;
+        public long RowsDeleted { get; set; } = 0;
+
         public DateTimeOffset? StartedAt { get; set; }
         public DateTimeOffset? CompletedAt { get; set; }
 

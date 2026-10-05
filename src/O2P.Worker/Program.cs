@@ -35,6 +35,11 @@ builder.ConfigureServices((hostContext, services) =>
     services.AddMetadataInfrastructure(hostContext.Configuration);
     services.AddOracleInfrastructure();
     services.AddPostgresInfrastructure();
+    // Batch size, stall watchdog, retries and LOB fetching - see docs/Ops_Runbook.md "Bulk copy speed".
+    // Registered before AddApplication, which only adds defaults when nothing is registered yet.
+    var copying = new O2P.Application.Copying.CopyTuningOptions();
+    hostContext.Configuration.GetSection("Copying").Bind(copying);
+    services.AddSingleton(copying);
     services.AddApplication();
 
     // Node-wide concurrency cap. Kept deliberately conservative by default: the source Oracle is

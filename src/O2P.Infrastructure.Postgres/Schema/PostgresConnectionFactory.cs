@@ -27,7 +27,7 @@ namespace O2P.Infrastructure.Postgres.Schema
                 Pooling = false
             };
 
-            var conn = new NpgsqlConnection(csb.ConnectionString);
+            var conn = new NpgsqlConnection(PostgresConnectionSettings.Harden(csb).ConnectionString);
             await conn.OpenAsync(cancellationToken);
             return conn;
         }

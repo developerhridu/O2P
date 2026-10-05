@@ -1,3 +1,4 @@
+using O2P.Application.Copying;
 using O2P.Application.Interfaces;
 using O2P.Application.Schema;
 using O2P.Domain.Entities;
@@ -15,7 +16,30 @@ namespace O2P.Infrastructure.Oracle.Reader
 {
     public class OracleDataReader : IOracleDataReader
     {
-        public async Task ReadChunkDataAsync(Connection connection, string password, string owner, string tableName, IReadOnlyList<ManifestColumn> columns, string? whereClause, ChunkLog chunk, ChannelWriter<object[]> outputChannel, IRateLimiter? rateLimiter, CancellationToken cancellationToken)
+        private readonly CopyTuningOptions _tuning;
+
+        public OracleDataReader(CopyTuningOptions tuning)
+        {
+            _tuning = tuning;
+        }
+
+        public async Task ReadChunkDataAsync(Connection connection, string password, string owner, string tableName, IReadOnlyList<ManifestColumn> columns, string? whereClause, ChunkLog chunk, ChannelWriter<object[]> outputChannel, IRateLimiter? rateLimiter, ChunkProgress? progress, CancellationToken cancellationToken)
+        {
+            try
+            {
+                await ReadCoreAsync(connection, password, owner, tableName, columns, whereClause, chunk, outputChannel, rateLimiter, progress, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                // Hand the failure to the writer straight away. Before, the channel was left open, the
+                // writer waited for rows that were never coming, and the batch sat there until the
+                // 20-minute limit fired - in a real run every failed read reported at exactly 1,200 s.
+                outputChannel.TryComplete(ex);
+                throw;
+            }
+        }
+
+        private async Task ReadCoreAsync(Connection connection, string password, string owner, string tableName, IReadOnlyList<ManifestColumn> columns, string? whereClause, ChunkLog chunk, ChannelWriter<object[]> outputChannel, IRateLimiter? rateLimiter, ChunkProgress? progress, CancellationToken cancellationToken)
         {
             if (connection.Host.Equals("mock", System.StringComparison.OrdinalIgnoreCase))
             {
@@ -33,7 +57,9 @@ namespace O2P.Infrastructure.Oracle.Reader
 
                     var mockRow = columns.Select((column, index) => MockValue(column, i, index, tableName, chunk.ChunkIndex)).ToArray();
 
+                    var start = System.Diagnostics.Stopwatch.GetTimestamp();
                     await outputChannel.WriteAsync(mockRow, cancellationToken);
+                    progress?.RowRead(start, start, System.Diagnostics.Stopwatch.GetTimestamp());
                 }
                 outputChannel.Complete();
                 return;
@@ -52,7 +78,8 @@ namespace O2P.Infrastructure.Oracle.Reader
                 ConnectionTimeout = 60
             };
 
-            using var conn = new OracleConnection(csb.ConnectionString);
+            // Keepalive and pooled-session validation: see OracleConnectionSettings.
+            using var conn = OracleConnectionSettings.Create(csb);
             await OracleConnectionRetry.OpenWithRetryAsync(conn, cancellationToken);
 
             var includedColumns = columns.Where(c => !c.IsExcluded).ToList();
@@ -70,7 +97,7 @@ namespace O2P.Infrastructure.Oracle.Reader
 
             if (!string.IsNullOrWhiteSpace(whereClause))
             {
-                predicates.Add($"({ValidateReadOnlyWhereClause(whereClause)})");
+                predicates.Add($"({OracleValues.ValidateReadOnlyWhereClause(whereClause)})");
             }
 
             // Slice the chunk according to its strategy. pk_range carries numeric key bounds on
@@ -123,16 +150,12 @@ namespace O2P.Infrastructure.Oracle.Reader
                 cmd.Parameters.Add(new OracleParameter("startRowId", chunk.StartRowId));
                 cmd.Parameters.Add(new OracleParameter("endRowId", chunk.EndRowId));
             }
-            // Fetch tuning. A 16 MB row-prefetch buffer gives great throughput for narrow rows, but is
-            // pathological for BLOB/CLOB columns: ODP.NET tries to fill 16 MB with LOB data before
-            // returning the first row, so on a high-latency source the read produces no rows and the
-            // chunk just re-leases forever ("stuck"). For LOB tables use a small prefetch and cap the
-            // inline LOB fetch so large LOBs stream in instead of being buffered whole up front.
-            var hasLob = includedColumns.Any(c => IsOracleLob(c.OracleDataType));
+            // Fetch tuning. For LOB tables, each LOB's first InitialLOBFetchSize bytes arrive with the row;
+            // the rest costs a separate round trip, which over a WAN is the expensive part.
+            var hasLob = includedColumns.Any(c => OracleValues.IsLob(c.OracleDataType));
             if (hasLob)
             {
-                cmd.FetchSize = 1 * 1024 * 1024;   // 1 MB prefetch so the first rows return promptly
-                cmd.InitialLOBFetchSize = 65536;    // 64 KB of each LOB inline; stream the remainder
+                cmd.InitialLOBFetchSize = Math.Max(0, _tuning.InitialLobFetchSize);
             }
             else
             {
@@ -142,8 +165,21 @@ namespace O2P.Infrastructure.Oracle.Reader
             using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             int fieldCount = reader.FieldCount;
 
-            while (await reader.ReadAsync(cancellationToken))
+            if (hasLob)
             {
+                // Sized from the real row, which for a LOB table includes the inline allowance of every LOB
+                // column: a fixed 1 MB used to mean ~16 rows per round trip, and raising the inline size
+                // alone would have dropped it to one. Bounded, so a wide row cannot eat memory.
+                var rowSize = Math.Max(1L, reader.RowSize);
+                reader.FetchSize = Math.Clamp(rowSize * Math.Max(1, _tuning.RowsPerRoundTrip), 1024 * 1024, Math.Max(1024 * 1024, _tuning.MaxFetchBytes));
+            }
+
+            while (true)
+            {
+                // Where the time goes: waiting on Oracle for the next row, then on the writer to take it.
+                var beforeRead = System.Diagnostics.Stopwatch.GetTimestamp();
+                if (!await reader.ReadAsync(cancellationToken)) break;
+
                 if (rateLimiter != null)
                 {
                     await rateLimiter.WaitAsync(1, cancellationToken);
@@ -153,9 +189,12 @@ namespace O2P.Infrastructure.Oracle.Reader
                 reader.GetValues(values);
                 for (var i = 0; i < values.Length; i++)
                 {
-                    values[i] = NormalizeOracleValue(values[i]);
+                    values[i] = OracleValues.Normalize(values[i]);
                 }
+
+                var beforeHandOver = System.Diagnostics.Stopwatch.GetTimestamp();
                 await outputChannel.WriteAsync(values, cancellationToken);
+                progress?.RowRead(beforeRead, beforeHandOver, System.Diagnostics.Stopwatch.GetTimestamp());
             }
 
             outputChannel.Complete();
@@ -170,56 +209,6 @@ namespace O2P.Infrastructure.Oracle.Reader
             if (type.Contains("bytea")) return Array.Empty<byte>();
             if (type.Contains("numeric")) return Convert.ToDecimal(row);
             return $"{tableName}_{column.ColumnName}_{row}";
-        }
-
-        private static readonly System.Collections.Generic.HashSet<string> LobOracleTypes =
-            new(System.StringComparer.OrdinalIgnoreCase) { "BLOB", "CLOB", "NCLOB", "LONG", "LONG RAW", "BFILE" };
-
-        // True for Oracle LOB types (as opposed to bounded RAW/VARCHAR2), which need LOB-aware fetch
-        // tuning to avoid stalling the read.
-        private static bool IsOracleLob(string? oracleType)
-        {
-            if (string.IsNullOrWhiteSpace(oracleType)) return false;
-            var baseType = oracleType.Trim().Split('(')[0].Trim().ToUpperInvariant();
-            return LobOracleTypes.Contains(baseType);
-        }
-
-        private static object NormalizeOracleValue(object value)
-        {
-            if (value == DBNull.Value)
-            {
-                return DBNull.Value;
-            }
-
-            if (value is string text)
-            {
-                var sanitized = text.Replace("\0", string.Empty);
-                return sanitized.Length == 0 ? DBNull.Value : sanitized;
-            }
-
-            if (value is double d && (double.IsNaN(d) || double.IsInfinity(d)))
-            {
-                return d;
-            }
-
-            if (value is float f && (float.IsNaN(f) || float.IsInfinity(f)))
-            {
-                return f;
-            }
-
-            return value;
-        }
-
-        private static string ValidateReadOnlyWhereClause(string whereClause)
-        {
-            var forbidden = new[] { ";", "--", "/*", "*/", " insert ", " update ", " delete ", " merge ", " drop ", " alter ", " create ", " execute ", " grant ", " revoke " };
-            var normalized = " " + whereClause.ToLowerInvariant() + " ";
-            if (forbidden.Any(normalized.Contains))
-            {
-                throw new ArgumentException("The manifest WHERE clause contains unsupported SQL.");
-            }
-
-            return whereClause;
         }
     }
 }

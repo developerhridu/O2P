@@ -14,7 +14,7 @@ namespace O2P.Infrastructure.Metadata
     {
         public static IServiceCollection AddMetadataInfrastructure(this IServiceCollection services, IConfiguration configuration)
         {
-            var connectionString = configuration.GetConnectionString("MetadataDb");
+            var connectionString = WithKeepAlive(configuration.GetConnectionString("MetadataDb"));
 
             services.AddDbContext<AppDbContext>(options =>
                 options.UseNpgsql(connectionString, b => b.MigrationsAssembly(typeof(AppDbContext).Assembly.FullName)));
@@ -45,6 +45,24 @@ namespace O2P.Infrastructure.Metadata
                 .PersistKeysToDbContext<AppDbContext>();
 
             return services;
+        }
+
+        /// <summary>
+        /// The same keepalive settings as O2P.Infrastructure.Postgres.PostgresConnectionSettings (see there for
+        /// why), for the metadata database, which may also sit behind a balancer in a deployment. Kept here
+        /// because this project does not reference that one. Values already in the connection string win.
+        /// </summary>
+        private static string? WithKeepAlive(string? connectionString)
+        {
+            if (string.IsNullOrWhiteSpace(connectionString)) return connectionString;
+
+            var builder = new Npgsql.NpgsqlConnectionStringBuilder(connectionString);
+            if (builder.KeepAlive <= 0) builder.KeepAlive = 20;
+            builder.TcpKeepAlive = true;
+            if (builder.TcpKeepAliveTime <= 0) builder.TcpKeepAliveTime = 20;
+            if (builder.TcpKeepAliveInterval <= 0) builder.TcpKeepAliveInterval = 5;
+            if (builder.ConnectionIdleLifetime >= 300) builder.ConnectionIdleLifetime = 30;
+            return builder.ConnectionString;
         }
     }
 }

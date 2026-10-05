@@ -75,7 +75,7 @@ namespace O2P.Infrastructure.Oracle.Reader
                 ConnectionTimeout = 60
             };
 
-            using var conn = new OracleConnection(csb.ConnectionString);
+            using var conn = OracleConnectionSettings.Create(csb);
             await OracleConnectionRetry.OpenWithRetryAsync(conn, cancellationToken);
 
             List<ChunkLog>? chunks;

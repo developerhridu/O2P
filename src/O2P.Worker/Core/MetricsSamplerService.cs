@@ -17,7 +17,9 @@ namespace O2P.Worker.Core
         private readonly ILogger<MetricsSamplerService> _logger;
         private readonly IServiceProvider _serviceProvider;
         private readonly GlobalGovernor _governor;
-        private readonly ConcurrentDictionary<long, long> _previousRowCounts = new();
+        private readonly ConcurrentDictionary<long, Totals> _previous = new();
+
+        private sealed record Totals(long Rows, long Bytes, DateTimeOffset At);
 
         public MetricsSamplerService(ILogger<MetricsSamplerService> logger, IServiceProvider serviceProvider, GlobalGovernor governor)
         {
@@ -55,26 +57,30 @@ namespace O2P.Worker.Core
 
             foreach (var job in activeJobs)
             {
-                var currentTotalRows = await db.ChunkLogs
+                // Running batches report their rows and bytes every few seconds, so these sums move while
+                // a batch is in flight rather than only when it commits.
+                var totals = await db.ChunkLogs
                     .Where(c => c.TableRun.JobRunId == job.Id)
-                    .SumAsync(c => c.RowsMigrated, cancellationToken);
+                    .GroupBy(c => 1)
+                    .Select(g => new { Rows = g.Sum(c => c.RowsMigrated), Bytes = g.Sum(c => c.BytesMigrated) })
+                    .FirstOrDefaultAsync(cancellationToken);
+                var current = new Totals(totals?.Rows ?? 0, totals?.Bytes ?? 0, DateTimeOffset.UtcNow);
 
                 var activeChunks = await db.ChunkLogs
                     .CountAsync(c => c.TableRun.JobRunId == job.Id && c.Status == "Running", cancellationToken);
 
-                long prevTotalRows = _previousRowCounts.GetOrAdd(job.Id, currentTotalRows);
-                long deltaRows = currentTotalRows - prevTotalRows;
-                double rowsPerSec = deltaRows / 2.0;
-
-                _previousRowCounts[job.Id] = currentTotalRows;
+                var previous = _previous.GetOrAdd(job.Id, current);
+                _previous[job.Id] = current;
+                var seconds = Math.Max(0.5, (current.At - previous.At).TotalSeconds);
 
                 var sample = new MetricSample
                 {
                     JobId = job.Id,
                     JobRunId = job.Id,
-                    Timestamp = DateTimeOffset.UtcNow,
-                    RowsPerSecond = Math.Max(0, rowsPerSec),
-                    MbPerSecond = 0, // MB tracking omitted for now
+                    Timestamp = current.At,
+                    // A batch that fails gives its rows back, so a sample can go down; show that as 0.
+                    RowsPerSecond = Math.Max(0, (current.Rows - previous.Rows) / seconds),
+                    MbPerSecond = Math.Max(0, (current.Bytes - previous.Bytes) / seconds / (1024.0 * 1024.0)),
                     ActiveChunkWorkers = activeChunks,
                     OracleSessions = activeChunks // Simple heuristic
                 };

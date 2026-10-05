@@ -1,5 +1,6 @@
 using Npgsql;
 using NpgsqlTypes;
+using O2P.Application.Copying;
 using O2P.Application.Interfaces;
 using O2P.Application.Schema;
 using O2P.Domain.Entities;
@@ -16,7 +17,7 @@ namespace O2P.Infrastructure.Postgres.Writer
 {
     public class PostgresBinaryWriter : IPostgresBinaryWriter
     {
-        public async Task<long> WriteDataAsync(Connection connection, string password, string targetSchema, string targetTable, IReadOnlyList<ManifestColumn> columns, string? targetNameStyle, long jobRunId, long tableRunId, int chunkIndex, ChannelReader<object[]> inputChannel, CancellationToken cancellationToken)
+        public async Task<long> WriteDataAsync(Connection connection, string password, string targetSchema, string targetTable, IReadOnlyList<ManifestColumn> columns, string? targetNameStyle, long jobRunId, long tableRunId, int chunkIndex, ChannelReader<object[]> inputChannel, ChunkProgress? progress, CancellationToken cancellationToken)
         {
             if (connection.Host.Equals("mock", System.StringComparison.OrdinalIgnoreCase))
             {
@@ -24,6 +25,7 @@ namespace O2P.Infrastructure.Postgres.Writer
                 await foreach (var row in inputChannel.ReadAllAsync(cancellationToken))
                 {
                     rows++;
+                    progress?.RowWritten(RowBytes(row));
                 }
                 return rows;
             }
@@ -36,13 +38,15 @@ namespace O2P.Infrastructure.Postgres.Writer
                 Username = connection.Username,
                 Password = password,
                 Pooling = true,
-                MinPoolSize = 1,
+                // No connection kept open with nothing to do: idle ones are what a balancer cuts.
+                MinPoolSize = 0,
                 MaxPoolSize = 100,
                 Timeout = 60,
                 CommandTimeout = 600
             };
 
-            await using var conn = new NpgsqlConnection(csb.ConnectionString);
+            // Keepalives and a short pooled idle lifetime: see PostgresConnectionSettings.
+            await using var conn = new NpgsqlConnection(PostgresConnectionSettings.Harden(csb).ConnectionString);
             await conn.OpenAsync(cancellationToken);
 
             var qualifiedTable = SqlIdentifier.QuotePostgresQualified(targetSchema, targetTable);
@@ -52,12 +56,8 @@ namespace O2P.Infrastructure.Postgres.Writer
             var includedColumns = columns.Where(c => !c.IsExcluded).OrderBy(c => c.Id).ToList();
             var copyColumns = string.Join(", ", includedColumns.Select(c => SqlIdentifier.QuotePostgres(PostgresName.TargetColumn(c, targetNameStyle))));
 
-            // Precompute the binary write plan per column. Oracle NUMBER/FLOAT come back from ODP.NET
-            // as .NET decimal regardless of the target column type, so a decimal written with type
-            // inference produces `numeric` binary format and Postgres rejects it against an
-            // integer/real/double column ("22P03: incorrect binary data format"). For those columns we
-            // write with the target column's explicit NpgsqlDbType and coerce the CLR value to match.
-            var columnPlans = includedColumns.Select(c => ResolveWritePlan(c.PostgresDataType)).ToArray();
+            // Precompute the binary write plan per column; see PostgresWritePlan for why numbers need one.
+            var columnPlans = PostgresWritePlan.ResolveAll(includedColumns.Select(c => c.PostgresDataType));
 
             await using var tx = await conn.BeginTransactionAsync(cancellationToken);
 
@@ -100,29 +100,9 @@ RETURNING chunk_index;";
             {
                 await foreach (var row in inputChannel.ReadAllAsync(cancellationToken))
                 {
-                    await importer.StartRowAsync(cancellationToken);
-                    for (var i = 0; i < row.Length; i++)
-                    {
-                        var val = row[i];
-                        if (val == System.DBNull.Value || val == null)
-                        {
-                            await importer.WriteNullAsync(cancellationToken);
-                            continue;
-                        }
-
-                        var plan = i < columnPlans.Length ? columnPlans[i] : default;
-                        if (plan.Typed)
-                        {
-                            await importer.WriteAsync(plan.Coerce(val), plan.DbType, cancellationToken);
-                        }
-                        else
-                        {
-                            // Non-numeric targets (text, timestamp, bytea, bool, ...) match their CLR
-                            // type, so type inference is correct and avoids over-constraining edge types.
-                            await importer.WriteAsync(val, cancellationToken);
-                        }
-                    }
+                    await PostgresWritePlan.WriteRowAsync(importer, row, columnPlans, cancellationToken);
                     rowsWritten++;
+                    progress?.RowWritten(RowBytes(row));
                 }
 
                 await importer.CompleteAsync(cancellationToken);
@@ -132,24 +112,11 @@ RETURNING chunk_index;";
             return rowsWritten;
         }
 
-        private readonly record struct WritePlan(bool Typed, NpgsqlDbType DbType, Func<object, object> Coerce);
-
-        // Maps a target Postgres column type to how its value must be written in a binary COPY.
-        // Only the numeric types need an explicit NpgsqlDbType + coercion (because Oracle numbers all
-        // arrive as .NET decimal); everything else is written via CLR-type inference, which is correct.
-        private static WritePlan ResolveWritePlan(string postgresType)
+        private static long RowBytes(object[] row)
         {
-            var baseType = Regex.Replace((postgresType ?? string.Empty).Trim().ToLowerInvariant(), @"\(.*?\)", "").Trim();
-            return baseType switch
-            {
-                "smallint" => new WritePlan(true, NpgsqlDbType.Smallint, v => Convert.ToInt16(v, CultureInfo.InvariantCulture)),
-                "integer" => new WritePlan(true, NpgsqlDbType.Integer, v => Convert.ToInt32(v, CultureInfo.InvariantCulture)),
-                "bigint" => new WritePlan(true, NpgsqlDbType.Bigint, v => Convert.ToInt64(v, CultureInfo.InvariantCulture)),
-                "real" => new WritePlan(true, NpgsqlDbType.Real, v => Convert.ToSingle(v, CultureInfo.InvariantCulture)),
-                "double precision" => new WritePlan(true, NpgsqlDbType.Double, v => Convert.ToDouble(v, CultureInfo.InvariantCulture)),
-                "numeric" => new WritePlan(true, NpgsqlDbType.Numeric, v => Convert.ToDecimal(v, CultureInfo.InvariantCulture)),
-                _ => new WritePlan(false, default, v => v),
-            };
+            long bytes = 0;
+            foreach (var value in row) bytes += ChunkProgress.SizeOf(value);
+            return bytes;
         }
 
         private static async Task DrainAsync(ChannelReader<object[]> inputChannel, CancellationToken cancellationToken)

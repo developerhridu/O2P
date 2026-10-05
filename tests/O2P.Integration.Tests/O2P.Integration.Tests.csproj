@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Opt-in integration tests against a real Oracle and PostgreSQL. Deliberately NOT part of
+    src/O2P.slnx, so a normal build or test run never needs (or touches) a database. Run with:
+      O2P_IT_ORACLE="host:port/service" O2P_IT_ORACLE_USER=... O2P_IT_ORACLE_PASSWORD=... \
+      O2P_IT_ORACLE_SYSTEM_PASSWORD=... dotnet test tests/O2P.Integration.Tests
+    The Oracle account must be a throwaway one - the tests create, change and drop tables in it.
+  -->
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\O2P.Infrastructure.Oracle\O2P.Infrastructure.Oracle.csproj" />
+    <ProjectReference Include="..\..\src\O2P.Infrastructure.Postgres\O2P.Infrastructure.Postgres.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.2" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+</Project>

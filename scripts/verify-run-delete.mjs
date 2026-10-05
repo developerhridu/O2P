@@ -190,8 +190,9 @@ const dialogs = [];
 page.on('dialog', async (d) => { dialogs.push(d.message()); await d.accept(); });
 
 await page.goto(`${UI}/jobs`, { waitUntil: 'networkidle' });
-const rowFor = (id) => page.locator('h4', { hasText: new RegExp(`^Run #${id}$`) }).locator('xpath=ancestor::div[contains(@class,"card")][1]');
-const visible = async (id) => (await page.locator('h4', { hasText: new RegExp(`^Run #${id}$`) }).count()) > 0;
+// A prefix match: the heading also carries the run's kind ("Bulk copy" / "Change copy").
+const rowFor = (id) => page.locator('h4', { hasText: new RegExp(`^Run #${id}\\b`) }).locator('xpath=ancestor::div[contains(@class,"card")][1]');
+const visible = async (id) => (await page.locator('h4', { hasText: new RegExp(`^Run #${id}\\b`) }).count()) > 0;
 
 check(await visible(neighbour), 'the finished neighbour run is listed');
 check((await rowFor(neighbour).getByRole('button', { name: /^delete$/i }).count()) === 1, 'a finished run shows a Delete button');

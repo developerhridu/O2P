@@ -28,7 +28,7 @@ namespace O2P.Infrastructure.Postgres.Validation
                 Password = password,
                 Pooling = false
             };
-            return csb.ConnectionString;
+            return PostgresConnectionSettings.Harden(csb).ConnectionString;
         }
 
         public async Task<bool> CheckVersionAsync(Connection targetConnection, string password, CancellationToken cancellationToken)

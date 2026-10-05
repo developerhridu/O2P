@@ -29,7 +29,7 @@ namespace O2P.Infrastructure.Oracle.Validation
                     Pooling = false
                 };
 
-                using var conn = new OracleConnection(oracleCsb.ConnectionString);
+                using var conn = OracleConnectionSettings.Create(oracleCsb);
                 await conn.OpenAsync(cancellationToken);
 
                 using var cmd = conn.CreateCommand();

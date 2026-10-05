@@ -35,5 +35,13 @@ namespace O2P.Application.Interfaces
         /// Used by the per-table Sync so a size can be refreshed without rescanning the schema.
         /// </summary>
         Task<TableSize> GetTableSizeAsync(Connection connection, string password, string owner, string tableName, CancellationToken cancellationToken);
+
+        /// <summary>
+        /// Names of the tables in one schema, and nothing else - no columns, sizes or statistics, so it is
+        /// quick on a schema of thousands of tables. Same filter as <see cref="DiscoverTablesAsync"/>, less
+        /// tables in the recycle bin and temporary tables, whose rows belong to a session and cannot be
+        /// compared. For the Dashboard's row-count comparison.
+        /// </summary>
+        Task<IReadOnlyList<string>> ListTableNamesAsync(Connection connection, string password, string owner, CancellationToken cancellationToken);
     }
 }

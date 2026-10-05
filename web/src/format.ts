@@ -29,3 +29,23 @@ export function formatBytes(bytes: number): string {
   if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${bytes} B`;
 }
+
+/** "just now", "5 min ago", "3 h ago", "2 days ago" - for when a figure was taken. */
+export function formatAgo(iso: string | null | undefined, now = Date.now()): string {
+  if (!iso) return '';
+  const seconds = Math.max(0, (now - new Date(iso).getTime()) / 1000);
+  if (seconds < 60) return 'just now';
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)} h ago`;
+  const days = Math.floor(seconds / 86400);
+  return days === 1 ? '1 day ago' : `${days} days ago`;
+}
+
+/** A duration in ms as "0.4 s", "12 s", "3 min 5 s". */
+export function formatDuration(ms: number | null | undefined): string {
+  if (ms == null) return '';
+  if (ms < 10_000) return `${(ms / 1000).toFixed(1)} s`;
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s} s`;
+  return `${Math.floor(s / 60)} min ${s % 60} s`;
+}

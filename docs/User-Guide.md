@@ -84,7 +84,8 @@ Not implemented as an Oracle object migration:
 - views, materialized views, procedures, functions, packages, triggers, grants, sequences, or synonyms;
 - source primary keys, foreign keys, check constraints, or indexes;
 - source identity/sequence semantics;
-- change data capture or ongoing synchronization;
+- continuous replication: changes are copied only when someone presses **Copy changes** (see
+  [Keep the destination up to date](#10-keep-the-destination-up-to-date-copy-changes));
 - schema-only or data-only run modes;
 - generated CSV/JSON migration reports;
 - row-level reject/salvage processing;
@@ -321,7 +322,7 @@ ASP.NET Core environment variables use double underscores in place of JSON nesti
 | `JwtSettings__Secret` | Yes | Repository defaults are development placeholders and must be overridden |
 | `JwtSettings__Issuer` | Yes | Loaded from API settings |
 | `JwtSettings__Audience` | Yes | Loaded from API settings |
-| `JwtSettings__ExpiryMinutes` | No | `20` minutes in current settings |
+| `JwtSettings__ExpiryMinutes` | No | `10080` (7 days) in current settings |
 | `BootstrapAdmin__Username` | No | `admin` |
 | `BootstrapAdmin__Email` | No | local internal address in settings |
 | `BootstrapAdmin__Password` | Operationally required | If blank, code uses an insecure fallback and forces password change |
@@ -329,7 +330,12 @@ ASP.NET Core environment variables use double underscores in place of JSON nesti
 | `Security__Cors__AllowedOrigins__N` | Required for remote UI origins | Local UI origins are listed in settings |
 | `Concurrency__MaxOracleSessions` | No | Worker default `8` |
 | `Concurrency__MaxChunkWorkers` | No | Worker default equals Oracle sessions; current JSON sets `8` |
-| `Concurrency__ChunkTimeoutMinutes` | No | `20`, clamped to at least 1 |
+| `Copying__RowsPerBatch` / `Copying__RowsPerLobBatch` | No | `200000` / `25000` rows per batch (tables with LOB columns use the second) |
+| `Copying__StallMinutes` | No | `10`: a batch is stopped only when no row has moved for this long |
+| `Copying__MaxBatchMinutes` | No | `0` = no absolute limit on one batch |
+| `Copying__MaxAttempts` | No | `5` automatic attempts per batch for connection failures and stalls |
+| `Copying__MaxRowsPerSecond` | No | `0` = no rate limit |
+| `Copying__InitialLobFetchSize` | No | `262144` bytes of each LOB fetched with its row |
 | `VITE_API_BASE_URL` | Required for separately hosted static UI | Otherwise `/api/v1` |
 
 The individual Windows scripts under `scripts/` expect pre-published output under `publish/api` and `publish/worker`; they are not source-development commands.
@@ -558,24 +564,24 @@ looser about nulls, is fine.
 
 ### Chunking, batch size, and concurrency
 
-There is no user-configurable batch-size option.
+Execution values (the `Copying` section of the Worker configuration; see Ops Runbook §6, "Bulk copy speed"):
 
-Implemented execution values:
-
-- planner target: `16` batches per table, hard-coded;
+- batches per table: estimated rows ÷ `Copying:RowsPerBatch` (200,000), or ÷ `Copying:RowsPerLobBatch` (25,000) for tables with LOB columns, between 1 and 2,000. When the size is unknown (no statistics, never counted), 16 batches are used. Run **Sync counts & sizes** before a large copy so the estimate is good;
 - bounded in-memory channel: `1,000` rows;
 - one PostgreSQL binary COPY transaction per batch;
-- fixed worker-wide rate limiter: `50,000` rows/second with a `10,000`-row burst;
+- rate limit: none by default (`Copying:MaxRowsPerSecond`);
 - Worker defaults: `8` Oracle sessions and `8` batch workers;
-- batch timeout: `20` minutes by default;
+- stall watchdog: a batch is stopped only when no row has moved for `Copying:StallMinutes` (10). A slow batch that is still moving is never stopped;
+- automatic retry: a batch that fails because a connection dropped, was refused or stalled goes back to the queue by itself after 30 s, 1 min, 2 min, then 5 min, up to `Copying:MaxAttempts` (5). Data errors are not retried;
+- running batches report their rows and bytes every 5 seconds, so the Runs page speed and MB/s are live;
 - metrics sample interval: `2` seconds.
 
-Configure effective concurrency in `src/O2P.Worker/appsettings.json`, `src/O2P.Worker/appsettings.Development.json`, or environment variables:
+Configure these in `src/O2P.Worker/appsettings.json`, `src/O2P.Worker/appsettings.Development.json`, or environment variables:
 
 ```powershell
 $env:Concurrency__MaxOracleSessions = "4"
 $env:Concurrency__MaxChunkWorkers = "4"
-$env:Concurrency__ChunkTimeoutMinutes = "30"
+$env:Copying__RowsPerLobBatch = "10000"
 ```
 
 The **Settings** screen stores values only in browser `localStorage`. It does not update the Worker, planner, rate limiter, validation, metrics interval, or retention behavior. Treat that screen as non-operational in the current version.
@@ -705,6 +711,99 @@ A clean run requires:
 - independent target sampling and migration-level checks.
 
 `CompletedWithErrors` is not a successful migration. It means at least one table failed or row-count validation did not pass.
+
+### 10. Keep the destination up to date: Copy changes
+
+After a bulk copy, **Copy changes** brings a table up to date with the Oracle source: rows added since the last
+copy are added, rows changed are updated, and **rows deleted are deleted**. Nothing is emptied, recreated or
+altered, and rows the source did not touch are left as they are. It runs when you press the button, never on
+its own.
+
+**Setting it up.** There is nothing to switch on in O2P. When a bulk copy finishes a table, O2P records the exact
+point in Oracle's change history the copy started from, and from then on that table is *tracked*. The
+**Change tracking** panel on the migration page lists every tracked table. A table is tracked only if:
+
+- the source was ready when the bulk copy **started** (run **Check change tracking** first — see below);
+- it has a primary key that Oracle enforces (`ENABLED VALIDATED`), and no key column was left out of the table
+  selection;
+- for a destination table that already existed: it has a primary key or unique index on exactly those columns.
+  A table the bulk copy created gets its primary key from the first **Copy changes**.
+
+Tables copied before this feature existed, or while the source was not ready, have no recorded start point —
+run one more bulk copy of them.
+
+**How a copy works.** Oracle's redo log records which rows every change touched. O2P reads it with LogMiner, for
+the tracked tables only, and takes just the key of each touched row. It then reads each of those rows **as it is
+in Oracle at one fixed moment** and makes PostgreSQL match: a row that exists is written, a row that no longer
+exists (or no longer passes the table's row filter) is deleted. Because the result depends only on the row's
+current state, not on how it got there, a copy can safely be run twice, stopped part-way, or retried — the
+destination always ends up the same.
+
+A transaction that changed a row but had not yet committed when the copy ran is picked up by the next copy,
+once it commits. The panel shows which open transactions held tracking back, and who owns them.
+
+**The first copy of a table O2P created** also tidies up: a bulk copy reads over minutes or hours while the source
+keeps changing, so a row changed during it can have been copied twice. The first **Copy changes** removes such
+duplicates, checks there are none left, and then adds the primary key (named `<table>_pkey`, built without
+locking the table for the length of the build).
+
+**What the run shows.** A change copy appears on the Runs page tagged **Change copy**, with *rows added or
+updated* and *rows deleted* per table. It can be cancelled; what was already applied stays applied and the next
+copy covers the rest. It is never retried — press **Copy changes** again instead, which continues from the last
+successful copy. A change copy has no row-count check: the destination also holds rows the copy did not touch,
+so whole-table counts would not match by design.
+
+**When a table needs a bulk copy again.** O2P stops tracking a table, says why, and asks for a new bulk copy
+when the change history cannot describe what happened to it:
+
+- it was truncated, moved, rebuilt, redefined, or a partition was dropped or exchanged;
+- a column was added or dropped, or another structural change was made;
+- something was written to it without logging (`NOLOGGING`, or a direct-path load);
+- the archived logs covering the time since its last copy have been deleted from the source;
+- the source database was reset to an earlier point (`RESETLOGS`).
+
+Other tables in the same copy carry on.
+
+**What is not carried across:** new columns added in the source (the destination keeps its columns), tables
+without an enforced primary key, and tables that are both index-organised and have LOB columns. Destination
+sequences are never advanced. On a destination table that already existed, triggers fire for every row written,
+and another unique constraint on it can reject rows that swapped values in a single copy.
+
+#### Preparing the source: Check change tracking
+
+LogMiner needs settings only your DBA can change. **Check change tracking** (on each table selection) looks at
+the source, **changes nothing**, and lists for each missing item the exact SQL to hand the DBA. Typically:
+
+```sql
+-- database-wide, once (ARCHIVELOG needs a restart)
+SHUTDOWN IMMEDIATE; STARTUP MOUNT; ALTER DATABASE ARCHIVELOG; ALTER DATABASE OPEN;
+ALTER DATABASE ADD SUPPLEMENTAL LOG DATA;
+ALTER DATABASE ADD SUPPLEMENTAL LOG DATA (PRIMARY KEY) COLUMNS;
+ALTER DATABASE FORCE LOGGING;                       -- recommended
+
+-- for the account O2P uses
+GRANT LOGMINING TO <o2p_user>;
+GRANT EXECUTE ON DBMS_LOGMNR TO <o2p_user>;
+GRANT SELECT ON V_$DATABASE TO <o2p_user>;
+GRANT SELECT ON V_$LOGMNR_CONTENTS TO <o2p_user>;
+GRANT SELECT ON GV_$TRANSACTION TO <o2p_user>;
+GRANT SELECT ON GV_$SESSION TO <o2p_user>;          -- optional: shows who holds tracking back
+GRANT FLASHBACK ON <owner>.<table> TO <o2p_user>;   -- per tracked table
+-- not multitenant only: V_$ARCHIVED_LOG, V_$LOG, V_$LOGFILE
+-- without FORCE LOGGING only: V_$DATAFILE, V_$TABLESPACE
+```
+
+Supplemental logging must already be on **when a bulk copy starts** — changes logged before it was on carry no
+keys — so switch it on, then run the bulk copy.
+
+**Supported sources:** Oracle that is not multitenant, and 21c or later multitenant, where a pluggable database
+can read its own change history. On **19c multitenant**, only the root container can read the history, as a
+common user (`C##…`), which needs a second connection; that is not available yet, and the check says so.
+
+**Keep archived logs long enough.** The change history lives in the source's archived logs. If they are deleted
+before the next **Copy changes** — by a backup policy, or on managed Oracle such as Amazon RDS, by its archived-log
+retention setting — the history in between is gone and the table needs a bulk copy. The check shows how far back
+the history currently reaches; press **Copy changes** more often than that.
 
 ### Live target limitation
 
@@ -921,7 +1020,7 @@ Planning and reading retry selected transient Oracle errors up to four attempts 
 ### Authentication failure or account lock
 
 - **Symptom:** `Invalid credentials`, disabled-account message, HTTP 423, or UI returns to login.
-- **Cause:** Wrong password, inactive account, five failed sign-ins, expired 20-minute token, password reset, or changed security stamp.
+- **Cause:** Wrong password, inactive account, five failed sign-ins, expired 7-day token, password reset, or changed security stamp.
 - **Diagnose:** Ask an administrator to inspect the Users page and API logs.
 - **Solution:** use the correct credential, unlock/reactivate the account, or reset the password. Lockout duration defaults to 15 minutes.
 
@@ -976,12 +1075,12 @@ Planning and reading retry selected transient Oracle errors up to four attempts 
 
 O2P snapshots and temporarily drops local PK, UNIQUE, FK, CHECK constraints and inbound FKs. It does not snapshot/drop standalone indexes or triggers.
 
-### Batch timeout
+### Batch stalled or connection dropped
 
-- **Symptom:** batch fails with `Chunk timed out ... stall watchdog`.
-- **Cause:** slow Oracle query, LOB transfer, blocked PostgreSQL, network delay, or too-short timeout.
-- **Diagnose:** inspect Oracle/PostgreSQL activity and Worker logs.
-- **Solution:** remove the bottleneck, lower concurrency, or increase `Concurrency__ChunkTimeoutMinutes`, then use the safe recovery procedure in section 11.
+- **Symptom:** a batch shows `Attempt N failed: ... Trying again automatically`, or fails with `No row moved for 10 minutes ... (after 5 attempts)`.
+- **Cause:** a dropped or refused connection (common over a VPN), a blocked PostgreSQL table, or a source that stopped returning rows.
+- **Diagnose:** the Worker log records each attempt, and for every finished batch how long it spent waiting for Oracle and for PostgreSQL. Inspect Oracle/PostgreSQL activity for locks.
+- **Solution:** the retries are automatic; nothing needs doing for a brief outage. If a batch fails after all attempts, remove the cause, then use **Retry failed**, which restores the full set of attempts.
 
 Oracle commands also use a 600-second command timeout; PostgreSQL writer commands use 600 seconds.
 
@@ -1145,7 +1244,10 @@ The target batch fence is per job/table-run/batch, so it does not cause a new jo
 
 ### Source consistency and downtime
 
-The tool is a bulk snapshot copy, not CDC. It does not capture changes made after a batch is read. For a consistent cutover, arrange a migration write freeze, a DBA-managed source-consistency mechanism, or a separate reconciliation process. O2P itself does not schedule downtime or delta sync.
+A bulk copy is not a point-in-time snapshot: its batches read at different moments while the source keeps
+changing. For a consistent cutover, either freeze writes, or bulk copy first and then press **Copy changes**
+(see [Keep the destination up to date](#10-keep-the-destination-up-to-date-copy-changes)) until the source is
+quiet, and once more after writes stop. O2P does not schedule downtime and does not copy changes on its own.
 
 ### Load tuning
 
@@ -1276,7 +1378,9 @@ Row-count equality checks quantity, not value equality. Perform deterministic sa
 
 ### Can source data change during migration?
 
-It can, but O2P does not provide a database-wide consistent snapshot or CDC. Changes can make the target inconsistent; use an operational freeze or external reconciliation strategy.
+It can. A bulk copy alone is not a consistent snapshot, but a bulk copy followed by **Copy changes** is: the
+change copy looks at everything that changed since the bulk copy started — including during it — and brings every
+touched row to one consistent moment. See [Keep the destination up to date](#10-keep-the-destination-up-to-date-copy-changes).
 
 ### Why can I not launch the Live target from the UI?
 

@@ -46,8 +46,25 @@ namespace O2P.Application.Schema
         public static bool IsLower(string? style) => string.Equals(style, LowerStyle, StringComparison.Ordinal);
 
         /// <summary>The destination name of one column under the run's style.</summary>
-        public static string TargetColumn(ManifestColumn column, string? style) =>
-            IsLower(style) ? For(column.ColumnName) : column.ColumnName;
+        public static string TargetColumn(ManifestColumn column, string? style) => TargetColumn(column.ColumnName, style);
+
+        /// <summary>The destination name of one Oracle column name under the run's style.</summary>
+        public static string TargetColumn(string oracleColumnName, string? style) =>
+            IsLower(style) ? For(oracleColumnName) : oracleColumnName;
+
+        /// <summary>
+        /// PostgreSQL silently truncates identifiers to 63 bytes. Anything O2P names itself is cut here
+        /// first, so the name it checks for a collision is the name that actually gets created.
+        /// </summary>
+        public static string Truncate63(string identifier)
+        {
+            var bytes = System.Text.Encoding.UTF8.GetBytes(identifier);
+            if (bytes.Length <= 63) return identifier;
+
+            var length = identifier.Length;
+            while (System.Text.Encoding.UTF8.GetByteCount(identifier.AsSpan(0, length)) > 63) length--;
+            return identifier.Substring(0, length);
+        }
 
         /// <summary>The destination names of a table's loaded columns, in COPY order.</summary>
         public static IReadOnlyList<string> TargetColumns(IEnumerable<ManifestColumn> columns, string? style) =>

@@ -14,9 +14,10 @@ import {
   Play
 } from 'lucide-react';
 import { commandJob, deleteJob, fetchJob, fetchMetrics, fetchValidation, hasRole } from '../api';
-import { commandLabel, statusColor, statusLabel } from '../labels';
+import { commandLabel, runKindLabel, statusColor, statusLabel } from '../labels';
 import { useWorkerStatus } from '../useWorkerStatus';
 import { WorkerBanner } from '../components/WorkerStatus';
+import '../components/ChangeTracking.css';
 
 export default function JobDetails() {
   const { id } = useParams();
@@ -139,11 +140,14 @@ export default function JobDetails() {
   const status = job.status as string;
   const canCancel = ['Running', 'Queued', 'Paused'].includes(status);
   const canDelete = !canCancel;
-  const canPause = status === 'Running';
-  const canResume = status === 'Paused';
-  const canRetry = ['Failed', 'Cancelled', 'CompletedWithErrors'].includes(status)
+  const canPause = status === 'Running' && job.kind !== 'changes';
+  const canResume = status === 'Paused' && job.kind !== 'changes';
+  const isChanges = job.kind === 'changes';
+  // A change copy can only be cancelled: retrying it the bulk way would empty its tables, and it
+  // has no batches to pause. The next Copy changes picks up where the last good one left off.
+  const canRetry = !isChanges && (['Failed', 'Cancelled', 'CompletedWithErrors'].includes(status)
     || job.tableRuns?.some((t: any) => t.status === 'Failed' || t.status === 'CompletedWithErrors'
-      || t.chunks?.some((c: any) => c.status === 'Failed' || c.status === 'Cancelled'));
+      || t.chunks?.some((c: any) => c.status === 'Failed' || c.status === 'Cancelled')));
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
@@ -155,8 +159,14 @@ export default function JobDetails() {
           <div>
             <h1 className="text-gradient" style={{ margin: 0 }}>Run #{jobId}</h1>
             <p style={{ margin: '4px 0 0 0', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+              <span className="run-kind" data-kind={job.kind}>{runKindLabel(job.kind)}</span>{' '}
               Migration: <strong>{job.application?.name}</strong> • Destination schema: <strong>{job.targetSchema}</strong>
             </p>
+            {isChanges && (
+              <p style={{ margin: '6px 0 0 0', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                Copies only what changed in the source since each table's last copy. Nothing is emptied or recreated.
+              </p>
+            )}
           </div>
           <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
             <span
@@ -258,6 +268,29 @@ export default function JobDetails() {
         </div>
       )}
 
+      {isChanges ? (
+        // A change copy has no batches, byte counts or speed; what matters is what it did to the rows.
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '16px' }} data-testid="change-stats">
+          <div className="card" style={{ padding: '20px' }}>
+            <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Rows added or updated</span>
+            <h2 style={{ margin: '8px 0 0 0', fontSize: '1.8rem' }}>
+              {(job.tableRuns?.reduce((a: number, t: any) => a + (t.rowsWritten || 0), 0) || 0).toLocaleString()}
+            </h2>
+          </div>
+          <div className="card" style={{ padding: '20px' }}>
+            <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Rows deleted</span>
+            <h2 style={{ margin: '8px 0 0 0', fontSize: '1.8rem' }}>
+              {(job.tableRuns?.reduce((a: number, t: any) => a + (t.rowsDeleted || 0), 0) || 0).toLocaleString()}
+            </h2>
+          </div>
+          <div className="card" style={{ padding: '20px' }}>
+            <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Tables up to date</span>
+            <h2 style={{ margin: '8px 0 0 0', fontSize: '1.8rem', color: '#34d399' }}>
+              {job.tableRuns?.filter((t: any) => t.status === 'Completed').length || 0} / {job.tableRuns?.length || 0}
+            </h2>
+          </div>
+        </div>
+      ) : (
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '16px' }}>
         <div className="card" style={{ padding: '20px' }}>
           <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Rows Copied</span>
@@ -280,6 +313,7 @@ export default function JobDetails() {
           </h2>
         </div>
       </div>
+      )}
 
       <div className="card">
         <h3 style={{ margin: '0 0 16px 0' }}>Tables in this run</h3>
@@ -312,6 +346,8 @@ export default function JobDetails() {
                   <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
                     <button
                       type="button"
+                      aria-expanded={isExpanded}
+                      aria-label={`${isExpanded ? 'Hide' : 'Show'} details for ${t.manifestTable?.tableName ?? t.targetTableName}`}
                       style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', display: 'flex' }}
                       onClick={() => setExpandedTableId(isExpanded ? null : t.id)}
                     >
@@ -331,6 +367,11 @@ export default function JobDetails() {
                   </div>
 
                   <div style={{ display: 'flex', gap: '24px', alignItems: 'center' }}>
+                    {isChanges ? (
+                      <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
+                        {(t.rowsWritten || 0).toLocaleString()} written · {(t.rowsDeleted || 0).toLocaleString()} deleted
+                      </div>
+                    ) : (
                     <div style={{ width: '120px' }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', marginBottom: '4px' }}>
                         <span>Batches</span>
@@ -340,6 +381,7 @@ export default function JobDetails() {
                         <div style={{ width: `${pctChunks}%`, height: '100%', background: '#10b981' }} />
                       </div>
                     </div>
+                    )}
 
                     <div style={{ width: '100px', textAlign: 'right' }}>
                       <span style={{ fontSize: '0.85rem', color: tableStatusColor, fontWeight: 'bold' }}>
@@ -351,6 +393,7 @@ export default function JobDetails() {
 
                 {isExpanded && (
                   <div style={{ borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '16px', marginTop: '4px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                    {!isChanges && (
                     <div>
                       <span style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '8px' }}>
                         Batch progress ({completedChunks} of {totalChunks} batches done)
@@ -377,13 +420,23 @@ export default function JobDetails() {
                         })}
                       </div>
                     </div>
+                    )}
 
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
                       <div className="card" style={{ background: 'rgba(255,255,255,0.01)', border: '1px solid rgba(255,255,255,0.03)', padding: '12px' }}>
                         <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Metrics</span>
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', fontSize: '0.85rem', marginTop: '8px' }}>
-                          <div>Rows copied: {t.rowsMigrated?.toLocaleString() || 0}</div>
-                          <div>Data copied: {((t.bytesMigrated || 0) / 1024).toFixed(2)} KB</div>
+                          {isChanges ? (
+                            <>
+                              <div data-testid="rows-written">Rows added or updated: {(t.rowsWritten || 0).toLocaleString()}</div>
+                              <div data-testid="rows-deleted">Rows deleted: {(t.rowsDeleted || 0).toLocaleString()}</div>
+                            </>
+                          ) : (
+                            <>
+                              <div>Rows copied: {t.rowsMigrated?.toLocaleString() || 0}</div>
+                              <div>Data copied: {((t.bytesMigrated || 0) / 1024).toFixed(2)} KB</div>
+                            </>
+                          )}
                         </div>
                         {t.errorMessage && (
                           // pre-wrap matters: a target-schema mismatch lists one problem per line,
@@ -394,7 +447,13 @@ export default function JobDetails() {
 
                       <div className="card" style={{ background: 'rgba(255,255,255,0.01)', border: '1px solid rgba(255,255,255,0.03)', padding: '12px' }}>
                         <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Row count check</span>
-                        {validation ? (
+                        {isChanges ? (
+                          <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', margin: '8px 0 0 0' }} data-testid="no-rowcount">
+                            Not used for a change copy: the destination also holds rows this copy did not touch, so whole-table
+                            counts would not match by design. Every row this copy touched was read from the source as it stood at
+                            one moment and written or deleted to match.
+                          </p>
+                        ) : validation ? (
                           <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '0.85rem', marginTop: '8px' }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: validation.passed ? '#10b981' : '#f87171' }}>
                               {validation.passed ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}

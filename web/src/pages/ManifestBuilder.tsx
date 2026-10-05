@@ -7,6 +7,7 @@ import {
   fetchManifest,
   syncTableStats,
   refreshDiscovery,
+  renameManifest,
   updateManifestTables,
 } from '../api';
 import SchemaCombobox from '../components/SchemaCombobox';
@@ -319,6 +320,9 @@ export default function ManifestBuilder() {
         await updateManifestTables(created.id, payload);
         navigate(`/applications/${appIdNum}/manifests/${created.id}/builder`, { replace: true });
       } else {
+        // The name box is editable here too; saving used to ignore a changed name for an existing
+        // selection. Rename first, so a name already in use stops the save before any table changes.
+        if (manifestName.trim()) await renameManifest(Number(manifestId), manifestName);
         await updateManifestTables(Number(manifestId), payload);
       }
     } catch (err: any) {
@@ -438,16 +442,14 @@ export default function ManifestBuilder() {
             <ArrowLeft size={20} />
           </Link>
           <div>
-            {isNew ? (
-              <input
-                value={manifestName}
-                onChange={(e) => setManifestName(e.target.value)}
-                className="tb-title-input"
-                aria-label="Table selection name"
-              />
-            ) : (
-              <h1 className="tb-title">{manifestName || 'Select tables'}</h1>
-            )}
+            {/* Editable for an existing selection too; Save selection saves the name with the tables. */}
+            <input
+              value={manifestName}
+              onChange={(e) => setManifestName(e.target.value)}
+              className="tb-title-input"
+              aria-label="Table selection name"
+              maxLength={200}
+            />
             <p className="tb-subtitle">Pick the tables to copy, and filter their rows if you need to.</p>
           </div>
         </div>

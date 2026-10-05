@@ -1,0 +1,88 @@
+/* ==========================================================================
+   Change tracking panel and readiness dialog.
+
+   Plain CSS, like builder.css and SchemaCombobox.css: the unlayered global rules in index.css win over
+   Tailwind's layered utilities, so these elements are styled by class instead.
+   ========================================================================== */
+
+.ct-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+.ct-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-secondary);
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-glass);
+  white-space: nowrap;
+}
+
+.ct-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  vertical-align: top;
+}
+
+.ct-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.ct-status {
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: help;
+}
+
+.ct-checks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ct-checks li {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.ct-checks li > svg {
+  flex: none;
+  margin-top: 3px;
+}
+
+.ct-sql {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border-glass);
+  background: rgba(0, 0, 0, 0.35);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: all;
+}
+
+/* "Bulk copy" / "Change copy" tag beside a run's name, on the Runs list and a run's page. */
+.run-kind {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  vertical-align: middle;
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.run-kind[data-kind='changes'] {
+  color: #7dd3fc;
+  background: rgba(56, 189, 248, 0.12);
+}

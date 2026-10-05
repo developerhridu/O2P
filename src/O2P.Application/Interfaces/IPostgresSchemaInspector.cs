@@ -52,5 +52,16 @@ namespace O2P.Application.Interfaces
             string schema,
             IReadOnlyCollection<string> tableNames,
             CancellationToken cancellationToken);
+
+        /// <summary>
+        /// Every table in the schema, for the Dashboard's row-count comparison: ordinary tables and
+        /// partitioned tables (once - their partitions are left out, the parent's count covers them).
+        /// O2P's own resume-fence table is left out. Returns two made-up tables for mock connections.
+        /// </summary>
+        Task<IReadOnlyList<string>> ListTableNamesAsync(
+            Connection connection,
+            string password,
+            string schema,
+            CancellationToken cancellationToken);
     }
 }

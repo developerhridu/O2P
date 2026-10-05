@@ -35,6 +35,8 @@ namespace O2P.Infrastructure.Metadata
         public DbSet<TypeMappingRule> TypeMappingRules { get; set; } = null!;
         public DbSet<WorkerControl> WorkerControls { get; set; } = null!;
         public DbSet<WorkerHeartbeat> WorkerHeartbeats { get; set; } = null!;
+        public DbSet<TrackedTable> TrackedTables { get; set; } = null!;
+        public DbSet<TableRowCount> TableRowCounts { get; set; } = null!;
 
         protected override void OnModelCreating(ModelBuilder builder)
         {
@@ -122,6 +124,7 @@ namespace O2P.Infrastructure.Metadata
                 b.HasOne(e => e.Application).WithMany().HasForeignKey(e => e.ApplicationId);
                 b.HasOne(e => e.Manifest).WithMany().HasForeignKey(e => e.ManifestId);
                 b.HasIndex(e => e.Status);
+                b.Property(e => e.Kind).HasDefaultValue(JobRunKind.Bulk);
             });
 
             builder.Entity<TableRun>(b =>
@@ -130,6 +133,9 @@ namespace O2P.Infrastructure.Metadata
                 b.HasKey(e => e.Id);
                 b.Property(e => e.Id).UseIdentityAlwaysColumn();
                 b.Property(e => e.ConstraintSnapshotJson).HasColumnType("jsonb");
+                b.Property(e => e.SourceObjectIdsJson).HasColumnType("jsonb");
+                b.Property(e => e.SourceKeyJson).HasColumnType("jsonb");
+                b.Property(e => e.SourceStartScn).HasColumnType("numeric");
                 b.HasOne(e => e.JobRun).WithMany(j => j.TableRuns).HasForeignKey(e => e.JobRunId);
                 b.HasOne(e => e.ManifestTable).WithMany().HasForeignKey(e => e.ManifestTableId);
                 b.HasIndex(e => e.Status);
@@ -228,6 +234,33 @@ namespace O2P.Infrastructure.Metadata
                 b.Property(e => e.Id).UseIdentityAlwaysColumn();
                 b.HasIndex(e => e.InstanceId).IsUnique();
                 b.HasIndex(e => e.LastSeenAt);
+            });
+
+            builder.Entity<TrackedTable>(b =>
+            {
+                b.ToTable("tracked_tables");
+                b.HasKey(e => e.Id);
+                b.Property(e => e.Id).UseIdentityAlwaysColumn();
+                b.Property(e => e.ColumnsJson).HasColumnType("jsonb");
+                b.Property(e => e.KeyColumnsJson).HasColumnType("jsonb");
+                b.Property(e => e.ObjectIdsJson).HasColumnType("jsonb");
+                b.Property(e => e.HeldBackByJson).HasColumnType("jsonb");
+                b.Property(e => e.LastScn).HasColumnType("numeric");
+                // What is being kept in sync is the destination table, so that is the identity.
+                b.HasIndex(e => new { e.TargetConnectionId, e.TargetSchema, e.TargetTableName }).IsUnique();
+                b.HasIndex(e => new { e.SourceConnectionId, e.SourceOwner, e.SourceTable });
+                // No relationships, on purpose - see TrackedTable.
+            });
+
+            builder.Entity<TableRowCount>(b =>
+            {
+                b.ToTable("table_row_counts");
+                b.HasKey(e => e.Id);
+                b.Property(e => e.Id).UseIdentityAlwaysColumn();
+                b.Property(e => e.SchemaName).IsRequired();
+                b.Property(e => e.TableName).IsRequired();
+                b.HasIndex(e => new { e.ConnectionId, e.SchemaName, e.TableName }).IsUnique();
+                // No relationship, on purpose - see TableRowCount.
             });
 
             builder.Entity<TypeMappingRule>(b =>
